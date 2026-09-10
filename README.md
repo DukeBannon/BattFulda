@@ -8,7 +8,7 @@ equipment, and scenarios remain external data compiled by Python.
 The stock Amiga 1200 baseline is a 68020, AGA, and 2 MB of Chip RAM. VS Code is
 the recommended editor, but PowerShell scripts are the authoritative builds.
 
-## Amiga A0 toolchain
+## Amiga toolchain
 
 - BartmanAbyss Amiga Debug VS Code extension, which supplies
   `m68k-amiga-elf-gcc`, `elf2hunk`, and `exe2adf`
@@ -17,25 +17,26 @@ the recommended editor, but PowerShell scripts are the authoritative builds.
 - The existing `A1200 Basic.uae` WinUAE configuration
 - PowerShell
 
-## Build and run A0
+## Build and run A1
 
 Open a PowerShell terminal and run:
 
 ```powershell
 cd C:\Repositories\Games\BattFulda
-.\build-amiga.ps1 -Clean -Run
+.\build-amiga.ps1 -Clean -Test -Run
 ```
 
 The build creates:
 
 ```text
-build\amiga\battalion_fulda_a0.exe
-build\amiga\battalion_fulda_a0.adf
+build\amiga\battalion_fulda_a1.exe
+build\amiga\battalion_fulda_a1.adf
 ```
 
-A0 verifies a native high-resolution Amiga screen and a shared map cursor
-controlled by the Amiga mouse or WASD. Left-click reports selection and Escape
-exits cleanly. See `docs\A0.md` for the acceptance test.
+A1 loads compiled terrain, scenario, and unit files from the bootable disk. It
+provides a real Fulda map, NATO and Warsaw Pact units, vertical map panning,
+mouse/WASD navigation, unit selection, and a tactical information panel. See
+`docs\A1.md` for the acceptance test.
 
 ## Preserved C64 D1 prototype
 
