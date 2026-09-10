@@ -1,34 +1,63 @@
 [CmdletBinding()]
 param(
-    [switch]$Run
+    [switch]$Run,
+    [switch]$Clean,
+    [switch]$Test
 )
 
 $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = $PSScriptRoot
-$kickAssemblerJar = 'C:\MiscApps\KickAssembler\KickAss.jar'
 $viceExecutable = 'C:\Emulators\VICE\bin\x64sc.exe'
-$sourceFile = Join-Path $repositoryRoot 'src\main.asm'
 $buildDirectory = Join-Path $repositoryRoot 'build'
-$outputName = 'battalion_fulda_d0.prg'
-$outputFile = Join-Path $buildDirectory $outputName
+$generatedDirectory = Join-Path $repositoryRoot 'generated'
+$dataCompiler = Join-Path $repositoryRoot 'tools\compile_data.py'
+$cSource = Join-Path $repositoryRoot 'src\main.c'
+$assetSource = Join-Path $repositoryRoot 'src\assets.s'
+$assetObject = Join-Path $buildDirectory 'assets.o'
+$outputFile = Join-Path $buildDirectory 'battalion_fulda_d1.prg'
+$mapFile = Join-Path $buildDirectory 'battalion_fulda_d1.map'
+$labelFile = Join-Path $buildDirectory 'battalion_fulda_d1.lbl'
 
-if (-not (Test-Path -LiteralPath $kickAssemblerJar -PathType Leaf)) {
-    throw "Kick Assembler was not found at '$kickAssemblerJar'."
+foreach ($tool in 'python', 'ca65', 'cl65') {
+    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+        throw "$tool was not found on PATH."
+    }
 }
 
-if (-not (Get-Command java -ErrorAction SilentlyContinue)) {
-    throw "Java was not found on PATH as 'java'."
+New-Item -ItemType Directory -Force -Path $buildDirectory, $generatedDirectory | Out-Null
+
+if ($Clean) {
+    Get-ChildItem -LiteralPath $buildDirectory -File |
+        Where-Object Name -ne '.gitkeep' |
+        Remove-Item -Force
+    Get-ChildItem -LiteralPath $generatedDirectory -File |
+        Where-Object Name -ne '.gitkeep' |
+        Remove-Item -Force
 }
 
-New-Item -ItemType Directory -Force -Path $buildDirectory | Out-Null
+& python $dataCompiler
+if ($LASTEXITCODE -ne 0) {
+    throw "Data compilation failed with exit code $LASTEXITCODE."
+}
 
-# Set explicit output locations so every generated artifact stays in build\.
-Push-Location $buildDirectory
-try {
-    & java -jar $kickAssemblerJar $sourceFile -o $outputName -symbolfile -symbolfiledir $buildDirectory -vicesymbols
+if ($Test) {
+    & python -m unittest discover -s (Join-Path $repositoryRoot 'tools') -p 'test_*.py'
     if ($LASTEXITCODE -ne 0) {
-        throw "Kick Assembler failed with exit code $LASTEXITCODE."
+        throw "Data tests failed with exit code $LASTEXITCODE."
+    }
+}
+
+Push-Location $repositoryRoot
+try {
+    & ca65 $assetSource -o $assetObject
+    if ($LASTEXITCODE -ne 0) {
+        throw "ca65 failed with exit code $LASTEXITCODE."
+    }
+
+    & cl65 -t c64 -Oirs -g -m $mapFile -Ln $labelFile -o $outputFile $cSource $assetObject
+    if ($LASTEXITCODE -ne 0) {
+        throw "cl65 failed with exit code $LASTEXITCODE."
     }
 }
 finally {
@@ -36,7 +65,7 @@ finally {
 }
 
 if (-not (Test-Path -LiteralPath $outputFile -PathType Leaf)) {
-    throw "Assembly completed without producing '$outputFile'."
+    throw "Compilation completed without producing '$outputFile'."
 }
 
 Write-Host "Build successful: $outputFile"
@@ -46,7 +75,16 @@ if ($Run) {
         throw "VICE x64sc was not found at '$viceExecutable'."
     }
 
-    Write-Host "Launching in VICE: $outputFile"
+    Write-Host "Launching VICE: WASD is ready; 1351 mouse is on port 1; keypad joystick is on port 2."
+    Write-Host "Mouse capture starts OFF. Click VICE, then press Alt+M when you want mouse control."
     $viceDirectory = Split-Path -Parent $viceExecutable
-    Start-Process -FilePath $viceExecutable -WorkingDirectory $viceDirectory -ArgumentList @('-autostart', $outputFile)
+    $viceArguments = @(
+        '-autostartprgmode', '1',
+        '-controlport1device', '3',
+        '-controlport2device', '1',
+        '-joydev2', '1',
+        '+mouse',
+        '-autostart', $outputFile
+    )
+    Start-Process -FilePath $viceExecutable -WorkingDirectory $viceDirectory -ArgumentList $viceArguments
 }

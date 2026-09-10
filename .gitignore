@@ -9,3 +9,5 @@
 Thumbs.db
 *.user
 *.workspace
+__pycache__/
+*.py[cod]
