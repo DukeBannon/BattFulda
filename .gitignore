@@ -1,0 +1,11 @@
+# D0 and future generated build artifacts
+/build/*
+/generated/*
+!/build/.gitkeep
+!/generated/.gitkeep
+
+# Common local editor and OS files
+.DS_Store
+Thumbs.db
+*.user
+*.workspace
