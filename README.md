@@ -1,47 +1,51 @@
 # Battalion: Fulda
 
-`Battalion: Fulda` is a Commodore 64 game project. The current D0 milestone is
-limited to verifying the assembler toolchain with a minimal runnable program.
+`Battalion: Fulda` is an Amiga 1200 tactical wargame inspired by the design of
+SSI's *Mech Brigade*. The production runtime is written in straightforward C,
+with assembly reserved for measured performance needs. Editable maps, units,
+equipment, and scenarios remain external data compiled by Python.
 
-## D0 prerequisites
+The stock Amiga 1200 baseline is a 68020, AGA, and 2 MB of Chip RAM. VS Code is
+the recommended editor, but PowerShell scripts are the authoritative builds.
 
-- Kick Assembler at `C:\MiscApps\KickAssembler\KickAss.jar`
-- Java available on `PATH` as `java`
-- VICE x64sc at `C:\Emulators\VICE\bin\x64sc.exe`
-- Python 3 available on `PATH` as `python` (reserved for later tooling; D0 does
-  not invoke Python)
+## Amiga A0 toolchain
 
-VS64 is optional IDE support and is not part of the build process.
+- BartmanAbyss Amiga Debug VS Code extension, which supplies
+  `m68k-amiga-elf-gcc`, `elf2hunk`, and `exe2adf`
+- A licensed Kickstart 3.1 A1200 ROM
+- WinUAE at `C:\Emulators\WinUAE\winuae64.exe`
+- The existing `A1200 Basic.uae` WinUAE configuration
+- PowerShell
 
-## Build D0
+## Build and run A0
 
 Open a PowerShell terminal and run:
 
 ```powershell
-Set-Location C:\Repositories\Games\BattFulda
-.\build.ps1
+cd C:\Repositories\Games\BattFulda
+.\build-amiga.ps1 -Clean -Run
 ```
 
-The script assembles `src\main.asm` and writes the PRG plus Kick Assembler
-symbol/debug files to `build\`. The runnable program is:
+The build creates:
 
 ```text
-C:\Repositories\Games\BattFulda\build\battalion_fulda_d0.prg
+build\amiga\battalion_fulda_a0.exe
+build\amiga\battalion_fulda_a0.adf
 ```
 
-## Build and run D0 in VICE
+A0 verifies a native high-resolution Amiga screen and a shared map cursor
+controlled by the Amiga mouse or WASD. Left-click reports selection and Escape
+exits cleanly. See `docs\A0.md` for the acceptance test.
 
-From the repository root, run:
+## Preserved C64 D1 prototype
+
+The earlier C64 proof of concept remains buildable for reference. It uses cc65,
+Python, and VICE:
 
 ```powershell
-.\build.ps1 -Run
+cd C:\Repositories\Games\BattFulda
+.\build.ps1 -Clean -Test
 ```
 
-After a successful assembly, the script launches the resulting PRG in x64sc.
-The C64 screen displays:
-
-```text
-BATTALION: FULDA
-D0 TOOLCHAIN TEST
-BUILD SUCCESSFUL
-```
+It produces `build\battalion_fulda_d1.prg`. See `docs\D1.md` for its
+architecture and binary data formats.
