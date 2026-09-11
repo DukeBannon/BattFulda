@@ -20,7 +20,12 @@
 #define VIEW_WIDTH 20
 #define VIEW_HEIGHT 11
 #define MAX_MAP_CELLS 300
-#define MAX_UNITS 31
+#define MAX_UNITS 64
+#define MAX_UNIT_TYPES 96
+#define MAX_FORMATIONS 64
+#define UNIT_TYPE_DATA_SIZE 4096
+#define FORMATION_DATA_SIZE 1024
+#define SCENARIO_DATA_SIZE 1024
 
 #define TILE_CLEAR 0
 #define TILE_ROAD 1
@@ -49,11 +54,43 @@ struct IntuitionBase *IntuitionBase;
 struct DosLibrary *DOSBase;
 
 struct TacticalUnit {
-    UBYTE side;
-    UBYTE type;
+    UBYTE id;
+    UBYTE type_id;
+    UBYTE formation_id;
     UBYTE x;
     UBYTE y;
     UBYTE strength;
+    UBYTE morale;
+    UBYTE suppression;
+    UBYTE readiness;
+    const char *name;
+};
+
+struct UnitType {
+    UBYTE faction;
+    UBYTE nation;
+    UBYTE echelon;
+    UBYTE category;
+    UBYTE mobility;
+    UBYTE move;
+    UBYTE hard_attack;
+    UBYTE soft_attack;
+    UBYTE defense;
+    UBYTE range;
+    UBYTE recon;
+    UBYTE command;
+    const char *name;
+};
+
+struct Formation {
+    UBYTE id;
+    UBYTE parent_id;
+    UBYTE faction;
+    UBYTE nation;
+    UBYTE kind;
+    UBYTE command;
+    UBYTE base_morale;
+    const char *name;
 };
 
 static struct Screen *game_screen;
@@ -61,12 +98,20 @@ static struct Window *game_window;
 static UBYTE map_width;
 static UBYTE map_height;
 static UBYTE map_tiles[MAX_MAP_CELLS];
+static UBYTE unit_type_data[UNIT_TYPE_DATA_SIZE];
+static UBYTE formation_data[FORMATION_DATA_SIZE];
+static UBYTE scenario_data[SCENARIO_DATA_SIZE];
+static struct UnitType unit_types[MAX_UNIT_TYPES];
+static struct Formation formations[MAX_FORMATIONS];
 static struct TacticalUnit units[MAX_UNITS];
+static UBYTE unit_type_count;
+static UBYTE formation_count;
 static UBYTE unit_count;
 static UBYTE cursor_x;
 static UBYTE cursor_y;
 static UBYTE camera_y;
 static BYTE selected_unit = -1;
+static const char *load_error = "UNKNOWN DATA ERROR";
 
 static const char *const terrain_names[] = {
     "CLEAR", "ROAD", "WOODS", "WATER", "TOWN"
@@ -74,9 +119,6 @@ static const char *const terrain_names[] = {
 static const UBYTE terrain_lengths[] = {5, 4, 5, 5, 4};
 static const char *const side_names[] = {"NATO", "WARSAW PACT"};
 static const UBYTE side_lengths[] = {4, 11};
-static const char *const type_names[] = {"ARMOR", "INFANTRY", "RECON"};
-static const UBYTE type_lengths[] = {5, 8, 5};
-static const UBYTE movement_values[] = {6, 4, 8};
 
 static void draw_text(struct RastPort *rp, WORD x, WORD y,
                       const char *text, UWORD length, UWORD color)
@@ -88,13 +130,39 @@ static void draw_text(struct RastPort *rp, WORD x, WORD y,
 
 static UBYTE format_number(UBYTE value, char *buffer)
 {
-    if (value >= 10) {
-        buffer[0] = '1';
-        buffer[1] = (char)('0' + value - 10);
-        return 2;
+    UBYTE length = 0;
+    if (value >= 100) {
+        buffer[length++] = (char)('0' + value / 100);
+        value %= 100;
+        buffer[length++] = (char)('0' + value / 10);
+    } else if (value >= 10) {
+        buffer[length++] = (char)('0' + value / 10);
     }
-    buffer[0] = (char)('0' + value);
-    return 1;
+    buffer[length++] = (char)('0' + value % 10);
+    return length;
+}
+
+static UWORD read_be16(const UBYTE *source)
+{
+    return ((UWORD)source[0] << 8) | source[1];
+}
+
+static BOOL has_magic(const UBYTE *data, const char *magic)
+{
+    return data[0] == (UBYTE)magic[0] && data[1] == (UBYTE)magic[1] &&
+           data[2] == (UBYTE)magic[2] && data[3] == (UBYTE)magic[3];
+}
+
+static const char *data_string(UBYTE *data, LONG size, UWORD table_offset,
+                               UWORD string_offset)
+{
+    ULONG position = (ULONG)table_offset + string_offset;
+    ULONG scan;
+    if (position >= (ULONG)size) return 0;
+    for (scan = position; scan < (ULONG)size; ++scan) {
+        if (data[scan] == 0) return (const char *)&data[position];
+    }
+    return 0;
 }
 
 static BOOL read_file(const char *name, UBYTE *buffer, LONG capacity, LONG *size)
@@ -109,52 +177,182 @@ static BOOL read_file(const char *name, UBYTE *buffer, LONG capacity, LONG *size
     return TRUE;
 }
 
-static BOOL load_game_data(void)
+static BOOL load_map_data(void)
 {
     static UBYTE buffer[512];
     LONG size;
-    UBYTE index;
     UWORD source;
     UWORD cell_count;
 
-    if (!read_file("map.bin", buffer, sizeof(buffer), &size) || size < 2)
+    if (!read_file("map.bin", buffer, sizeof(buffer), &size) || size < 2) {
+        load_error = "MAP.BIN MISSING OR SHORT";
         return FALSE;
+    }
     map_width = buffer[0];
     map_height = buffer[1];
     cell_count = (UWORD)map_width * map_height;
     if (map_width != VIEW_WIDTH || map_height < VIEW_HEIGHT ||
-        cell_count > MAX_MAP_CELLS || size != (LONG)cell_count + 2)
+        cell_count > MAX_MAP_CELLS || size != (LONG)cell_count + 2) {
+        load_error = "MAP.BIN FORMAT ERROR";
         return FALSE;
+    }
     for (source = 0; source < cell_count; ++source) {
-        if (buffer[source + 2] > TILE_TOWN) return FALSE;
+        if (buffer[source + 2] > TILE_TOWN) {
+            load_error = "MAP.BIN TERRAIN ERROR";
+            return FALSE;
+        }
         map_tiles[source] = buffer[source + 2];
     }
+    return TRUE;
+}
 
-    if (!read_file("units.bin", buffer, sizeof(buffer), &size) || size < 1)
+static BOOL load_unit_types(void)
+{
+    LONG size;
+    UBYTE index;
+    UWORD strings_offset;
+    if (!read_file("unit_types.bin", unit_type_data, sizeof(unit_type_data), &size) ||
+        size < 9) {
+        load_error = "UNIT_TYPES.BIN MISSING";
         return FALSE;
-    unit_count = buffer[0];
-    if (!unit_count || unit_count > MAX_UNITS || size != (LONG)unit_count * 5 + 1)
-        return FALSE;
-    source = 1;
-    for (index = 0; index < unit_count; ++index) {
-        units[index].side = buffer[source++];
-        units[index].type = buffer[source++];
-        units[index].x = buffer[source++];
-        units[index].y = buffer[source++];
-        units[index].strength = buffer[source++];
-        if (units[index].side > 1 || units[index].type > 2 ||
-            units[index].x >= map_width || units[index].y >= map_height)
-            return FALSE;
     }
+    unit_type_count = unit_type_data[5];
+    strings_offset = read_be16(&unit_type_data[7]);
+    if (!has_magic(unit_type_data, "BFUT") || unit_type_data[4] != 1 ||
+        !unit_type_count || unit_type_count > MAX_UNIT_TYPES ||
+        unit_type_data[6] != 14 || strings_offset < 9 + unit_type_count * 14 ||
+        strings_offset >= (UWORD)size) {
+        load_error = "UNIT_TYPES.BIN FORMAT ERROR";
+        return FALSE;
+    }
+    for (index = 0; index < unit_type_count; ++index) {
+        UBYTE *record = &unit_type_data[9 + (UWORD)index * 14];
+        struct UnitType *type = &unit_types[index];
+        type->faction = record[0];
+        type->nation = record[1];
+        type->echelon = record[2];
+        type->category = record[3];
+        type->mobility = record[4];
+        type->move = record[5];
+        type->hard_attack = record[6];
+        type->soft_attack = record[7];
+        type->defense = record[8];
+        type->range = record[9];
+        type->recon = record[10];
+        type->command = record[11];
+        type->name = data_string(unit_type_data, size, strings_offset,
+                                 read_be16(&record[12]));
+        if (type->faction > 1 || !type->name) {
+            load_error = "UNIT TYPE RECORD ERROR";
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
 
-    if (!read_file("scenario.bin", buffer, sizeof(buffer), &size) || size != 4)
+static BOOL load_formations(void)
+{
+    LONG size;
+    UBYTE index;
+    UWORD strings_offset;
+    if (!read_file("formations.bin", formation_data, sizeof(formation_data), &size) ||
+        size < 9) {
+        load_error = "FORMATIONS.BIN MISSING";
         return FALSE;
-    if (buffer[0] != 1 || buffer[3] != unit_count ||
-        buffer[1] >= map_width || buffer[2] >= map_height)
+    }
+    formation_count = formation_data[5];
+    strings_offset = read_be16(&formation_data[7]);
+    if (!has_magic(formation_data, "BFFM") || formation_data[4] != 1 ||
+        !formation_count || formation_count > MAX_FORMATIONS ||
+        formation_data[6] != 9 || strings_offset < 9 + formation_count * 9 ||
+        strings_offset >= (UWORD)size) {
+        load_error = "FORMATIONS.BIN FORMAT ERROR";
         return FALSE;
-    cursor_x = buffer[1];
-    cursor_y = buffer[2];
+    }
+    for (index = 0; index < formation_count; ++index) {
+        UBYTE *record = &formation_data[9 + (UWORD)index * 9];
+        struct Formation *formation = &formations[index];
+        formation->id = record[0];
+        formation->parent_id = record[1];
+        formation->faction = record[2];
+        formation->nation = record[3];
+        formation->kind = record[4];
+        formation->command = record[5];
+        formation->base_morale = record[6];
+        formation->name = data_string(formation_data, size, strings_offset,
+                                      read_be16(&record[7]));
+        if (formation->faction > 1 || !formation->name) {
+            load_error = "FORMATION RECORD ERROR";
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static struct Formation *formation_by_id(UBYTE id)
+{
+    UBYTE index;
+    for (index = 0; index < formation_count; ++index) {
+        if (formations[index].id == id) return &formations[index];
+    }
+    return 0;
+}
+
+static BOOL load_scenario(void)
+{
+    LONG size;
+    UBYTE index;
+    UWORD strings_offset;
+    if (!read_file("a2_scenario.bin", scenario_data, sizeof(scenario_data), &size) ||
+        size < 16) {
+        load_error = "A2_SCENARIO.BIN MISSING";
+        return FALSE;
+    }
+    cursor_x = scenario_data[9];
+    cursor_y = scenario_data[10];
+    unit_count = scenario_data[12];
+    strings_offset = read_be16(&scenario_data[14]);
+    if (!has_magic(scenario_data, "BFSC") || scenario_data[4] != 2 ||
+        scenario_data[6] != map_width || scenario_data[7] != map_height ||
+        !scenario_data[8] ||
+        scenario_data[11] != formation_count || !unit_count ||
+        unit_count > MAX_UNITS || scenario_data[13] != 11 ||
+        cursor_x >= map_width || cursor_y >= map_height ||
+        strings_offset < 16 + unit_count * 11 || strings_offset >= (UWORD)size) {
+        load_error = "A2_SCENARIO.BIN FORMAT ERROR";
+        return FALSE;
+    }
+    for (index = 0; index < unit_count; ++index) {
+        UBYTE *record = &scenario_data[16 + (UWORD)index * 11];
+        struct TacticalUnit *unit = &units[index];
+        struct Formation *formation;
+        unit->id = record[0];
+        unit->type_id = record[1];
+        unit->formation_id = record[2];
+        unit->x = record[3];
+        unit->y = record[4];
+        unit->strength = record[5];
+        unit->morale = record[6];
+        unit->suppression = record[7];
+        unit->readiness = record[8];
+        unit->name = data_string(scenario_data, size, strings_offset,
+                                 read_be16(&record[9]));
+        formation = formation_by_id(unit->formation_id);
+        if (unit->type_id >= unit_type_count || !formation || !unit->name ||
+            unit->x >= map_width || unit->y >= map_height ||
+            formation->faction != unit_types[unit->type_id].faction) {
+            load_error = "SCENARIO UNIT RECORD ERROR";
+            return FALSE;
+        }
+    }
     camera_y = cursor_y >= VIEW_HEIGHT ? cursor_y - VIEW_HEIGHT + 1 : 0;
+    return TRUE;
+}
+
+static BOOL load_game_data(void)
+{
+    if (!load_map_data() || !load_unit_types() || !load_formations() ||
+        !load_scenario()) return FALSE;
     return TRUE;
 }
 
@@ -223,8 +421,9 @@ static void draw_terrain(struct RastPort *rp, UBYTE tile, WORD left, WORD top)
 static void draw_unit(struct RastPort *rp, BYTE index, WORD left, WORD top)
 {
     const struct TacticalUnit *unit = &units[(UBYTE)index];
-    UWORD color = unit->side == 0 ? COLOR_NATO : COLOR_WARSAW;
-    const char *symbol = unit->side == 0 ? "N" : "W";
+    const struct UnitType *type = &unit_types[unit->type_id];
+    UWORD color = type->faction == 0 ? COLOR_NATO : COLOR_WARSAW;
+    const char *symbol = type->faction == 0 ? "N" : "W";
 
     SetAPen(rp, color);
     RectFill(rp, left + 3, top + 3, left + 12, top + 12);
@@ -271,9 +470,35 @@ static void draw_value(struct RastPort *rp, WORD y, const char *label,
     draw_text(rp, 488, y, value, value_length, COLOR_WHITE);
 }
 
+static void draw_clipped(struct RastPort *rp, WORD x, WORD y,
+                         const char *text, UBYTE maximum, UWORD color)
+{
+    UBYTE length = 0;
+    while (length < maximum && text[length]) ++length;
+    draw_text(rp, x, y, text, length, color);
+}
+
+static const char *morale_name(UBYTE morale, UBYTE *length)
+{
+    if (morale >= 85) {
+        *length = 9;
+        return "CONFIDENT";
+    }
+    if (morale >= 70) {
+        *length = 6;
+        return "STEADY";
+    }
+    if (morale >= 50) {
+        *length = 6;
+        return "SHAKEN";
+    }
+    *length = 6;
+    return "BROKEN";
+}
+
 static void draw_panel(struct RastPort *rp)
 {
-    char number[2];
+    char number[3];
     UBYTE length;
     UBYTE tile = tile_at(cursor_x, cursor_y);
     clear_panel(rp);
@@ -281,22 +506,32 @@ static void draw_panel(struct RastPort *rp)
 
     if (selected_unit >= 0) {
         const struct TacticalUnit *unit = &units[(UBYTE)selected_unit];
+        const struct UnitType *type = &unit_types[unit->type_id];
+        struct Formation *formation = formation_by_id(unit->formation_id);
+        struct Formation *parent = formation && formation->parent_id != 255 ?
+                                   formation_by_id(formation->parent_id) : 0;
+        const char *morale;
         tile = tile_at(unit->x, unit->y);
-        draw_text(rp, 384, 82, "SELECTED UNIT", 13, COLOR_HIGHLIGHT);
-        draw_value(rp, 102, "SIDE:", 5, side_names[unit->side],
-                   side_lengths[unit->side]);
-        draw_value(rp, 118, "TYPE:", 5, type_names[unit->type],
-                   type_lengths[unit->type]);
+        draw_text(rp, 384, 76, "SELECTED UNIT", 13, COLOR_HIGHLIGHT);
+        draw_text(rp, 520, 76, side_names[type->faction],
+                  side_lengths[type->faction], COLOR_HIGHLIGHT);
+        draw_clipped(rp, 384, 92, unit->name, 31, COLOR_WHITE);
+        draw_clipped(rp, 384, 108, type->name, 31, COLOR_TEXT);
+        if (formation) draw_clipped(rp, 384, 124, formation->name, 31, COLOR_WHITE);
+        if (parent) draw_clipped(rp, 384, 140, parent->name, 31, COLOR_TEXT);
+
         length = format_number(unit->strength, number);
-        draw_value(rp, 134, "STRENGTH:", 9, number, length);
-        length = format_number(movement_values[unit->type], number);
-        draw_value(rp, 150, "MOVE:", 5, number, length);
-        draw_value(rp, 166, "TERRAIN:", 8, terrain_names[tile],
+        draw_value(rp, 158, "STRENGTH:", 9, number, length);
+        morale = morale_name(unit->morale, &length);
+        draw_value(rp, 174, "MORALE:", 7, morale, length);
+        length = format_number(unit->suppression, number);
+        draw_value(rp, 190, "SUPPRESSION:", 12, number, length);
+        length = format_number(unit->readiness, number);
+        draw_value(rp, 206, "READINESS:", 10, number, length);
+        length = format_number(type->move, number);
+        draw_value(rp, 222, "MOVE:", 5, number, length);
+        draw_value(rp, 238, "TERRAIN:", 8, terrain_names[tile],
                    terrain_lengths[tile]);
-        draw_value(rp, 182, "FORMATION:", 10,
-                   unit->side == 0 ? "TASK FORCE ALPHA" : "GUARDS REGIMENT",
-                   unit->side == 0 ? 16 : 15);
-        draw_text(rp, 384, 222, "RIGHT CLICK/ESC: CANCEL", 23, COLOR_TEXT);
     } else {
         draw_text(rp, 384, 86, "NO UNIT SELECTED", 16, COLOR_TEXT);
         draw_value(rp, 110, "TERRAIN:", 8, terrain_names[tile],
@@ -306,7 +541,8 @@ static void draw_panel(struct RastPort *rp)
         draw_text(rp, 384, 182, "ESC: EXIT", 9, COLOR_TEXT);
     }
 
-    draw_text(rp, 384, 246, "A1 MAP + UNIT INTERACTION", 25, COLOR_HIGHLIGHT);
+    if (selected_unit < 0)
+        draw_text(rp, 384, 246, "A2.2 DATABASE RUNTIME", 21, COLOR_HIGHLIGHT);
 }
 
 static void update_cursor_terrain(struct RastPort *rp)
@@ -333,7 +569,7 @@ static void draw_scene(struct RastPort *rp)
 {
     SetRast(rp, COLOR_BACKGROUND);
     draw_text(rp, 24, 22, "BATTALION: FULDA", 16, COLOR_HIGHLIGHT);
-    draw_text(rp, 24, 37, "FULDA GAP - A1", 14, COLOR_TEXT);
+    draw_text(rp, 24, 37, "FULDA GAP - A2.2", 16, COLOR_TEXT);
     draw_map(rp);
     draw_panel(rp);
 }
@@ -439,6 +675,28 @@ static void close_display(void)
     if (game_screen) CloseScreen(game_screen);
 }
 
+static void data_error_loop(void)
+{
+    BOOL waiting = TRUE;
+    struct RastPort *rp = game_window->RPort;
+    SetRast(rp, COLOR_BACKGROUND);
+    draw_text(rp, 24, 30, "BATTALION: FULDA", 16, COLOR_HIGHLIGHT);
+    draw_text(rp, 24, 62, "DATA LOAD FAILED", 16, COLOR_WARSAW);
+    draw_clipped(rp, 24, 86, load_error, 60, COLOR_WHITE);
+    draw_text(rp, 24, 118, "CHECK THE A2.2 DATA FILES", 25, COLOR_TEXT);
+    draw_text(rp, 24, 150, "PRESS A KEY OR MOUSE BUTTON", 27, COLOR_TEXT);
+    while (waiting) {
+        struct IntuiMessage *message;
+        Wait(1UL << game_window->UserPort->mp_SigBit);
+        while ((message = (struct IntuiMessage *)GetMsg(game_window->UserPort))) {
+            ULONG event_class = message->Class;
+            ReplyMsg((struct Message *)message);
+            if (event_class == IDCMP_RAWKEY || event_class == IDCMP_MOUSEBUTTONS)
+                waiting = FALSE;
+        }
+    }
+}
+
 static void input_loop(void)
 {
     BOOL running = TRUE;
@@ -484,6 +742,7 @@ static void input_loop(void)
 
 int game_main(void)
 {
+    BOOL data_loaded;
     SysBase = *(struct ExecBase **)4UL;
     DOSBase = (struct DosLibrary *)OpenLibrary((CONST_STRPTR)"dos.library", 39);
     if (!DOSBase) return 20;
@@ -500,8 +759,10 @@ int game_main(void)
         return 20;
     }
 
-    if (load_game_data() && open_display()) {
-        input_loop();
+    data_loaded = load_game_data();
+    if (open_display()) {
+        if (data_loaded) input_loop();
+        else data_error_loop();
         close_display();
     }
 

@@ -380,21 +380,33 @@ def compile_scenario(connection: sqlite3.Connection, scenario_key: str) -> bytes
     scenario = scenario_row(connection, scenario_key)
     units = list(connection.execute("""
         SELECT scenario_unit_id, unit_type_id, formation_id, x, y, strength,
-               morale, suppression, readiness
+               morale, suppression, readiness, display_name, unit_key
         FROM scenario_unit WHERE scenario_id = ? ORDER BY scenario_unit_id
     """, (scenario["scenario_id"],)))
     formation_count = scalar(
         connection, "SELECT COUNT(*) FROM formation WHERE scenario_id = ?",
         (scenario["scenario_id"],),
     )
-    record_format = ">BBBBBBBBB"
-    records = b"".join(struct.pack(record_format, *tuple(row)) for row in units)
+    record_format = ">BBBBBBBBBH"
+    records = bytearray()
+    strings = bytearray()
+    for row in units:
+        name_offset = append_string(strings, row["display_name"], row["unit_key"])
+        records.extend(struct.pack(
+            record_format, row["scenario_unit_id"], row["unit_type_id"],
+            row["formation_id"], row["x"], row["y"], row["strength"],
+            row["morale"], row["suppression"], row["readiness"], name_offset,
+        ))
+    header_format = ">4sBBBBBBBBBBH"
+    header_size = struct.calcsize(header_format)
+    strings_offset = header_size + len(records)
     header = struct.pack(
-        ">4sBBBBBBBBBB", b"BFSC", 1, scenario["scenario_id"], scenario["width"],
+        header_format, b"BFSC", 2, scenario["scenario_id"], scenario["width"],
         scenario["height"], scenario["turn_minutes"], scenario["cursor_x"],
-        scenario["cursor_y"], formation_count, len(units), struct.calcsize(record_format),
+        scenario["cursor_y"], formation_count, len(units),
+        struct.calcsize(record_format), strings_offset,
     )
-    return header + records
+    return header + records + strings
 
 
 def compile_database_assets(

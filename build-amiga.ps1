@@ -36,10 +36,10 @@ $outputDirectory = Join-Path $repositoryRoot 'build\amiga'
 $generatedDirectory = Join-Path $repositoryRoot 'generated'
 $diskDataDirectory = Join-Path $outputDirectory 'disk-data'
 $dataCompiler = Join-Path $repositoryRoot 'tools\compile_data.py'
-$elfFile = Join-Path $outputDirectory 'battalion_fulda_a1.elf'
-$exeFile = Join-Path $outputDirectory 'battalion_fulda_a1.exe'
-$adfFile = Join-Path $outputDirectory 'battalion_fulda_a1.adf'
-$mapFile = Join-Path $outputDirectory 'battalion_fulda_a1.map'
+$elfFile = Join-Path $outputDirectory 'battalion_fulda_a2.elf'
+$exeFile = Join-Path $outputDirectory 'battalion_fulda_a2.exe'
+$adfFile = Join-Path $outputDirectory 'battalion_fulda_a2.adf'
+$mapFile = Join-Path $outputDirectory 'battalion_fulda_a2.map'
 $sources = @(
     (Join-Path $repositoryRoot 'amiga\src\startup.c'),
     (Join-Path $repositoryRoot 'amiga\src\main.c')
@@ -70,8 +70,6 @@ if ($Test) {
 
 $diskDataFiles = @(
     'map.bin',
-    'units.bin',
-    'scenario.bin',
     'unit_types.bin',
     'formations.bin',
     'a2_scenario.bin'
@@ -100,7 +98,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Amiga executable conversion failed with exit code $LASTEXITCODE."
 }
 
-& $exe2adf -i $exeFile -a $adfFile -l 'BATT FULDA A1' -d $diskDataDirectory
+& $exe2adf -i $exeFile -a $adfFile -l 'BATT FULDA A2' -d $diskDataDirectory
 if ($LASTEXITCODE -ne 0) {
     throw "Amiga disk creation failed with exit code $LASTEXITCODE."
 }
@@ -109,7 +107,7 @@ Write-Host "A1200 build successful: $exeFile"
 Write-Host "Bootable test disk: $adfFile"
 
 if ($Run) {
-    Write-Host 'Launching the existing A1200 configuration with the A1 game disk.'
+    Write-Host 'Launching the existing A1200 configuration with the A2 game disk.'
     Start-Process -FilePath $winUae -WorkingDirectory (Split-Path $winUae) -ArgumentList @(
         '-f', "`"$winUaeConfig`"",
         '-0', "`"$adfFile`"",

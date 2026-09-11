@@ -45,12 +45,13 @@ class DatabaseTests(unittest.TestCase):
         formation_header = struct.unpack(">4sBBBH", assets["formations.bin"][:9])
         self.assertEqual(formation_header, (b"BFFM", 1, 5, 9, 54))
 
-        scenario_header = struct.unpack(">4sBBBBBBBBBB", assets["a2_scenario.bin"][:14])
+        scenario_header = struct.unpack(">4sBBBBBBBBBBH", assets["a2_scenario.bin"][:16])
         self.assertEqual(
             scenario_header,
-            (b"BFSC", 1, 0, 20, 15, 15, 9, 7, 5, 11, 9),
+            (b"BFSC", 2, 0, 20, 15, 15, 9, 7, 5, 11, 11, 137),
         )
-        self.assertEqual(len(assets["a2_scenario.bin"]), 14 + 11 * 9)
+        self.assertGreater(len(assets["a2_scenario.bin"]), 16 + 11 * 11)
+        self.assertIn(b"Team Alpha Headquarters\0", assets["a2_scenario.bin"])
 
     def test_runtime_ids_may_repeat_in_different_scenarios(self) -> None:
         connection = manage_database.connect(self.database)

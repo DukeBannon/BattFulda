@@ -17,7 +17,7 @@ the recommended editor, but PowerShell scripts are the authoritative builds.
 - The existing `A1200 Basic.uae` WinUAE configuration
 - PowerShell
 
-## Build and run A1
+## Build and run the current Amiga milestone
 
 Open a PowerShell terminal and run:
 
@@ -29,14 +29,15 @@ cd C:\Repositories\Games\BattFulda
 The build creates:
 
 ```text
-build\amiga\battalion_fulda_a1.exe
-build\amiga\battalion_fulda_a1.adf
+build\amiga\battalion_fulda_a2.exe
+build\amiga\battalion_fulda_a2.adf
 ```
 
-A1 loads compiled terrain, scenario, and unit files from the bootable disk. It
-provides a real Fulda map, NATO and Warsaw Pact units, vertical map panning,
-mouse/WASD navigation, unit selection, and a tactical information panel. See
-`docs\A1.md` for the acceptance test.
+A2.2 loads the Fulda terrain plus database-compiled unit types, formations, and
+scenario units from the bootable disk. It provides vertical map panning,
+mouse/WASD navigation, unit selection, and a tactical information panel backed
+by the SQLite-authored order of battle. See `docs\A2.2.md` for the acceptance
+test. The completed A1 milestone is documented in `docs\A1.md`.
 
 ## A2.1 relational data foundation
 
@@ -54,6 +55,14 @@ python .\tools\manage_database.py compile
 
 The normal Amiga build performs database validation and compilation through
 `tools\compile_data.py`. See `docs\A2.1.md` for the schema and binary formats.
+
+## A2.2 database-driven Amiga runtime
+
+The Amiga runtime now reads `unit_types.bin`, `formations.bin`, and
+`a2_scenario.bin` directly. Unit names, types, formation hierarchy, strength,
+morale, suppression, readiness, and movement values shown by the tactical
+display all originate in SQLite. The disk no longer carries or uses the legacy
+A1 `units.bin` and `scenario.bin` fixtures.
 
 ## Preserved C64 D1 prototype
 
