@@ -1,5 +1,5 @@
 INSERT INTO schema_info(version, created_utc)
-VALUES (3, '2026-09-11T00:00:00Z');
+VALUES (5, '2026-09-11T00:00:00Z');
 
 INSERT INTO faction(faction_id, faction_key, display_name) VALUES
     (0, 'NATO', 'NATO'),

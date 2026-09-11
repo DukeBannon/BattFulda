@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import csv
 from contextlib import contextmanager
 import json
@@ -217,13 +218,76 @@ def mark_areas(
                         cells[y][x][field] = max(cells[y][x][field], hits)
 
 
+def hex_neighbors(x: int, y: int) -> Iterator[tuple[int, int, int, int]]:
+    """Yield odd-column-down hex neighbors as x, y, direction bit, opposite bit."""
+    diagonal_up = -1 if x % 2 == 0 else 0
+    diagonal_down = 0 if x % 2 == 0 else 1
+    directions = (
+        (0, -1, 1, 8),
+        (1, diagonal_up, 2, 16),
+        (1, diagonal_down, 4, 32),
+        (0, 1, 8, 1),
+        (-1, diagonal_down, 16, 2),
+        (-1, diagonal_up, 32, 4),
+    )
+    for delta_x, delta_y, direction, opposite in directions:
+        neighbor_x = x + delta_x
+        neighbor_y = y + delta_y
+        if 0 <= neighbor_x < WIDTH and 0 <= neighbor_y < HEIGHT:
+            yield neighbor_x, neighbor_y, direction, opposite
+
+
+def shortest_hex_path(
+    start: tuple[int, int], end: tuple[int, int]
+) -> list[tuple[int, int]]:
+    if start == end:
+        return [start]
+    frontier = deque([start])
+    previous: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
+    while frontier:
+        current = frontier.popleft()
+        for neighbor_x, neighbor_y, _, _ in hex_neighbors(*current):
+            neighbor = (neighbor_x, neighbor_y)
+            if neighbor in previous:
+                continue
+            previous[neighbor] = current
+            if neighbor == end:
+                path = [end]
+                while path[-1] != start:
+                    parent = previous[path[-1]]
+                    if parent is None:
+                        raise MapBuildError("Hex path ended unexpectedly")
+                    path.append(parent)
+                path.reverse()
+                return path
+            frontier.append(neighbor)
+    raise MapBuildError(f"No hex path between {start} and {end}")
+
+
+def connect_hex_cells(
+    cells: list[list[dict[str, int]]], start: tuple[int, int],
+    end: tuple[int, int], link_field: str, class_field: str, class_value: int,
+) -> None:
+    path = shortest_hex_path(start, end)
+    for x, y in path:
+        cells[y][x][class_field] = max(cells[y][x][class_field], class_value)
+    for first, second in zip(path, path[1:]):
+        for neighbor_x, neighbor_y, direction, opposite in hex_neighbors(*first):
+            if (neighbor_x, neighbor_y) != second:
+                continue
+            cells[first[1]][first[0]][link_field] |= direction
+            cells[second[1]][second[0]][link_field] |= opposite
+            break
+
+
 def mark_lines(
     cells: list[list[dict[str, int]]], features: list[dict[str, Any]], field: str,
-    classifier: Callable[[dict[str, Any]], int],
+    classifier: Callable[[dict[str, Any]], int], link_field: str | None = None,
 ) -> None:
     for feature in features:
         value = classifier(feature.get("properties") or {})
         for line in line_strings(feature.get("geometry") or {}):
+            previous: tuple[int, int] | None = None
             for start, end in zip(line, line[1:]):
                 delta_e = end[0] - start[0]
                 delta_n = end[1] - start[1]
@@ -233,9 +297,14 @@ def mark_lines(
                         start[0] + delta_e * step / steps,
                         start[1] + delta_n * step / steps,
                     )
-                    if point is not None:
-                        x, y = point
-                        cells[y][x][field] = max(cells[y][x][field], value)
+                    if point is None:
+                        previous = None
+                        continue
+                    x, y = point
+                    cells[y][x][field] = max(cells[y][x][field], value)
+                    if link_field is not None and previous is not None and previous != point:
+                        connect_hex_cells(cells, previous, point, link_field, field, value)
+                    previous = point
 
 
 def road_class(properties: dict[str, Any]) -> int:
@@ -258,11 +327,12 @@ def river_class(properties: dict[str, Any]) -> int:
 
 def enrich_cells(elevations: list[list[int]], directory: Path) -> list[list[dict[str, int]]]:
     cells = [[{
-        "road": 0, "river": 0, "settlement": 0, "bridge": 0,
+        "road": 0, "road_links": 0, "river": 0, "river_links": 0,
+        "settlement": 0, "bridge": 0,
         "woods": 0, "marsh": 0, "rough": 0, "water": 0,
     } for _ in range(WIDTH)] for _ in range(HEIGHT)]
-    mark_lines(cells, load_features(directory, "roads"), "road", road_class)
-    mark_lines(cells, load_features(directory, "water_axis"), "river", river_class)
+    mark_lines(cells, load_features(directory, "roads"), "road", road_class, "road_links")
+    mark_lines(cells, load_features(directory, "water_axis"), "river", river_class, "river_links")
     mark_lines(cells, load_features(directory, "bridges"), "bridge", lambda _: 1)
     mark_areas(cells, load_features(directory, "woods"), "woods")
     mark_areas(cells, load_features(directory, "settlements"), "settlement")
@@ -282,7 +352,8 @@ def write_cells(
         writer = csv.writer(target, lineterminator="\n")
         writer.writerow((
             "map_key", "x", "y", "elevation_m", "terrain_key", "road_class",
-            "river_class", "settlement_level", "has_bridge", "source_status", "notes",
+            "road_links", "river_class", "river_links", "settlement_level",
+            "has_bridge", "source_status", "notes",
         ))
         for y, row in enumerate(elevations):
             for x, elevation in enumerate(row):
@@ -302,7 +373,8 @@ def write_cells(
                 has_features = any(features.values())
                 writer.writerow((
                     MAP_KEY, x, y, elevation, terrain,
-                    features.get("road", 0), features.get("river", 0),
+                    features.get("road", 0), features.get("road_links", 0),
+                    features.get("river", 0), features.get("river_links", 0),
                     min(3, features.get("settlement", 0)),
                     1 if features.get("bridge") else 0,
                     "draft" if has_features else "elevation_only", "",

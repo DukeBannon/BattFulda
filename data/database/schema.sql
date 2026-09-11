@@ -54,6 +54,7 @@ CREATE TABLE unit_type (
     range_cells INTEGER NOT NULL CHECK (range_cells BETWEEN 0 AND 255),
     recon INTEGER NOT NULL CHECK (recon BETWEEN 0 AND 15),
     command INTEGER NOT NULL CHECK (command BETWEEN 0 AND 15),
+    amphibious INTEGER NOT NULL CHECK (amphibious IN (0, 1)),
     availability_1985 TEXT NOT NULL CHECK (
         availability_1985 IN ('common', 'fielding', 'limited', 'second_line')
     ),
@@ -114,7 +115,9 @@ CREATE TABLE map_cell (
     terrain_id INTEGER NOT NULL REFERENCES terrain_type(terrain_id),
     elevation_m INTEGER NOT NULL CHECK (elevation_m BETWEEN -500 AND 9000),
     road_class INTEGER NOT NULL DEFAULT 0 CHECK (road_class BETWEEN 0 AND 3),
+    road_links INTEGER NOT NULL DEFAULT 0 CHECK (road_links BETWEEN 0 AND 63),
     river_class INTEGER NOT NULL DEFAULT 0 CHECK (river_class BETWEEN 0 AND 3),
+    river_links INTEGER NOT NULL DEFAULT 0 CHECK (river_links BETWEEN 0 AND 63),
     settlement_level INTEGER NOT NULL DEFAULT 0 CHECK (settlement_level BETWEEN 0 AND 3),
     has_bridge INTEGER NOT NULL DEFAULT 0 CHECK (has_bridge IN (0, 1)),
     source_status TEXT NOT NULL CHECK (
@@ -199,6 +202,7 @@ SELECT
     ut.range_cells,
     ut.recon,
     ut.command,
+    ut.amphibious,
     ut.availability_1985,
     ut.notes,
     ut.source_url,
@@ -227,7 +231,8 @@ SELECT
     su.strength,
     su.morale,
     su.suppression,
-    su.readiness
+    su.readiness,
+    ut.amphibious
 FROM scenario_unit su
 JOIN scenario s ON s.scenario_id = su.scenario_id
 JOIN formation fo

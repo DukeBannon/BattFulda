@@ -12,6 +12,11 @@ Thumbs.db
 __pycache__/
 *.py[cod]
 
+# C# and Visual Studio build artifacts
+**/bin/
+**/obj/
+.vs/
+
 # SQLite transient files created by graphical editors
 *.sqlite-journal
 *.sqlite-shm

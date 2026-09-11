@@ -39,6 +39,17 @@ class DatabaseTests(unittest.TestCase):
 
         connection = manage_database.connect(self.database)
         try:
+            crossing = connection.execute("""
+                SELECT
+                    (SELECT amphibious FROM unit_type WHERE type_key = 'su_motor_rifle_platoon_bmp2'),
+                    (SELECT amphibious FROM unit_type WHERE type_key = 'us_tank_platoon_m1')
+            """).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(tuple(crossing), (1, 0))
+
+        connection = manage_database.connect(self.database)
+        try:
             terrain = connection.execute("""
                 SELECT MIN(elevation_m), MAX(elevation_m), COUNT(*),
                        COUNT(DISTINCT source_status)
@@ -55,13 +66,32 @@ class DatabaseTests(unittest.TestCase):
                     SUM(CASE WHEN terrain_id = 1 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN terrain_id = 5 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN road_class > 0 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN road_links > 0 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN river_class > 0 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN river_links > 0 THEN 1 ELSE 0 END),
                     SUM(has_bridge)
                 FROM map_cell WHERE map_id = 1
             """).fetchone()
         finally:
             connection.close()
         self.assertTrue(all(value > 0 for value in features))
+
+    def test_map_feature_links_must_be_reciprocal(self) -> None:
+        connection = manage_database.connect(self.database)
+        try:
+            cell = connection.execute("""
+                SELECT map_id, x, y FROM map_cell
+                WHERE road_links > 0 ORDER BY map_id, y, x LIMIT 1
+            """).fetchone()
+            connection.execute(
+                "UPDATE map_cell SET road_links = 0 WHERE map_id = ? AND x = ? AND y = ?",
+                tuple(cell),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaisesRegex(manage_database.DataError, "one-way link"):
+            manage_database.validate_database(self.database)
 
     def test_compact_binary_headers_and_sizes(self) -> None:
         output = self.root / "generated"

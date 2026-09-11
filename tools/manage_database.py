@@ -23,7 +23,7 @@ UNIT_TYPES_PATH = ROOT / "data" / "units" / "unit_types.csv"
 MAP_CELLS_PATH = ROOT / "data" / "maps" / "point_alpha_cells.csv"
 EXPORT_DIRECTORY = DATABASE_DIRECTORY / "exports"
 OUTPUT_DIRECTORY = ROOT / "generated"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 DEFAULT_SCENARIO = "a2_command_post"
 DEFAULT_PRODUCTION_MAP = "point_alpha_corridor"
 
@@ -74,6 +74,36 @@ def integer(record: dict[str, str], field: str, minimum: int, maximum: int) -> i
     return value
 
 
+def validate_feature_links(connection: sqlite3.Connection) -> None:
+    cells = {
+        (row["map_id"], row["x"], row["y"]): row
+        for row in connection.execute(
+            "SELECT map_id, x, y, road_links, river_links FROM map_cell"
+        )
+    }
+    for (map_id, x, y), row in cells.items():
+        diagonal_up = -1 if x % 2 == 0 else 0
+        diagonal_down = 0 if x % 2 == 0 else 1
+        directions = (
+            (0, -1, 1, 8),
+            (1, diagonal_up, 2, 16),
+            (1, diagonal_down, 4, 32),
+            (0, 1, 8, 1),
+            (-1, diagonal_down, 16, 2),
+            (-1, diagonal_up, 32, 4),
+        )
+        for field in ("road_links", "river_links"):
+            mask = row[field]
+            for delta_x, delta_y, direction, opposite in directions:
+                if not mask & direction:
+                    continue
+                neighbor = cells.get((map_id, x + delta_x, y + delta_y))
+                if neighbor is None or not neighbor[field] & opposite:
+                    raise DataError(
+                        f"{field} has a one-way link at map {map_id} cell ({x}, {y})"
+                    )
+
+
 def import_unit_types(connection: sqlite3.Connection, path: Path = UNIT_TYPES_PATH) -> int:
     try:
         source = path.open("r", encoding="utf-8", newline="")
@@ -89,7 +119,7 @@ def import_unit_types(connection: sqlite3.Connection, path: Path = UNIT_TYPES_PA
         "type_id", "faction", "country", "echelon", "category", "display_name",
         "equipment", "role", "mobility", "move_points", "hard_attack",
         "soft_attack", "defense", "range_cells", "recon", "command",
-        "availability_1985", "notes", "source_url", "rating_status",
+        "amphibious", "availability_1985", "notes", "source_url", "rating_status",
     }
 
     with source:
@@ -109,8 +139,8 @@ def import_unit_types(connection: sqlite3.Connection, path: Path = UNIT_TYPES_PA
             unit_type_id, type_key, faction_id, nation_id, echelon_id,
             category_id, mobility_id, display_name, equipment, role,
             move_points, hard_attack, soft_attack, defense, range_cells,
-            recon, command, availability_1985, notes, source_url, rating_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            recon, command, amphibious, availability_1985, notes, source_url, rating_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     for runtime_id, record in enumerate(records):
         try:
@@ -139,7 +169,8 @@ def import_unit_types(connection: sqlite3.Connection, path: Path = UNIT_TYPES_PA
                 integer(record, "defense", 0, 15),
                 integer(record, "range_cells", 0, 255),
                 integer(record, "recon", 0, 15), integer(record, "command", 0, 15),
-                record["availability_1985"], record["notes"], record["source_url"],
+                integer(record, "amphibious", 0, 1), record["availability_1985"],
+                record["notes"], record["source_url"],
                 record["rating_status"],
             ),
         )
@@ -153,7 +184,8 @@ def import_map_cells(connection: sqlite3.Connection, path: Path = MAP_CELLS_PATH
         raise DataError(f"Cannot read {path.relative_to(ROOT)}: {error}") from error
     expected_fields = {
         "map_key", "x", "y", "elevation_m", "terrain_key", "road_class",
-        "river_class", "settlement_level", "has_bridge", "source_status", "notes",
+        "road_links", "river_class", "river_links", "settlement_level",
+        "has_bridge", "source_status", "notes",
     }
     map_ids = lookup(connection, "map", "map_id", "map_key")
     terrain_ids = lookup(connection, "terrain_type", "terrain_id", "terrain_key")
@@ -164,9 +196,10 @@ def import_map_cells(connection: sqlite3.Connection, path: Path = MAP_CELLS_PATH
         records = list(reader)
     insert_sql = """
         INSERT INTO map_cell(
-            map_id, x, y, terrain_id, elevation_m, road_class, river_class,
-            settlement_level, has_bridge, source_status, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            map_id, x, y, terrain_id, elevation_m, road_class, road_links,
+            river_class, river_links, settlement_level, has_bridge,
+            source_status, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     for record in records:
         try:
@@ -175,7 +208,8 @@ def import_map_cells(connection: sqlite3.Connection, path: Path = MAP_CELLS_PATH
             values = (
                 map_id, int(record["x"]), int(record["y"]), terrain_id,
                 int(record["elevation_m"]), int(record["road_class"]),
-                int(record["river_class"]), int(record["settlement_level"]),
+                int(record["road_links"]), int(record["river_class"]),
+                int(record["river_links"]), int(record["settlement_level"]),
                 int(record["has_bridge"]), record["source_status"], record["notes"],
             )
         except (KeyError, ValueError) as error:
@@ -281,6 +315,8 @@ def validate_database(path: Path = DATABASE_PATH) -> dict[str, int]:
         bad_map_cells = scalar(connection, """
             SELECT COUNT(*) FROM map_cell mc JOIN map m ON m.map_id = mc.map_id
             WHERE mc.x >= m.width OR mc.y >= m.height
+               OR (mc.road_links <> 0 AND mc.road_class = 0)
+               OR (mc.river_links <> 0 AND mc.river_class = 0)
         """)
         incomplete_maps = scalar(connection, """
             SELECT COUNT(*) FROM map m
@@ -295,6 +331,8 @@ def validate_database(path: Path = DATABASE_PATH) -> dict[str, int]:
         """)
         if bad_map_cells or incomplete_maps or unsourced_maps:
             raise DataError("Database contains incomplete, out-of-bounds, or unsourced map data")
+
+        validate_feature_links(connection)
 
         for formation in connection.execute(
             "SELECT scenario_id, formation_id, parent_formation_id FROM formation"
@@ -364,6 +402,7 @@ def export_database(path: Path = DATABASE_PATH, output: Path = EXPORT_DIRECTORY)
             SELECT scenario_key, scenario_unit_id, unit_key, unit_name,
                    formation_name, parent_formation, type_key, unit_type,
                    faction, country, x, y, strength, morale, suppression, readiness
+                   , amphibious
             FROM v_scenario_order_of_battle
             ORDER BY scenario_key, scenario_unit_id
         """)
@@ -383,8 +422,8 @@ def export_database(path: Path = DATABASE_PATH, output: Path = EXPORT_DIRECTORY)
                         "SELECT * FROM terrain_type ORDER BY terrain_id")
         write_query_csv(connection, output / "map_cells.csv", """
             SELECT m.map_key, mc.x, mc.y, tt.terrain_key, mc.elevation_m,
-                   mc.road_class, mc.river_class, mc.settlement_level,
-                   mc.has_bridge, mc.source_status, mc.notes
+                   mc.road_class, mc.road_links, mc.river_class, mc.river_links,
+                   mc.settlement_level, mc.has_bridge, mc.source_status, mc.notes
             FROM map_cell mc JOIN map m ON m.map_id = mc.map_id
             JOIN terrain_type tt ON tt.terrain_id = mc.terrain_id
             ORDER BY m.map_id, mc.y, mc.x
@@ -405,8 +444,8 @@ def save_map_seed(
             raise DataError(f"Unknown map: {map_key}")
         write_query_csv(connection, output, """
             SELECT m.map_key, mc.x, mc.y, mc.elevation_m, tt.terrain_key,
-                   mc.road_class, mc.river_class, mc.settlement_level,
-                   mc.has_bridge, mc.source_status, mc.notes
+                   mc.road_class, mc.road_links, mc.river_class, mc.river_links,
+                   mc.settlement_level, mc.has_bridge, mc.source_status, mc.notes
             FROM map_cell mc JOIN map m ON m.map_id = mc.map_id
             JOIN terrain_type tt ON tt.terrain_id = mc.terrain_id
             WHERE m.map_key = ? ORDER BY mc.y, mc.x
