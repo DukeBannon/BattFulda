@@ -29,15 +29,16 @@ cd C:\Repositories\Games\BattFulda
 The build creates:
 
 ```text
-build\amiga\battalion_fulda_a2.exe
-build\amiga\battalion_fulda_a2.adf
+build\amiga\battalion_fulda_a3.exe
+build\amiga\battalion_fulda_a3.adf
 ```
 
-A2.2 loads the Fulda terrain plus database-compiled unit types, formations, and
-scenario units from the bootable disk. It provides vertical map panning,
-mouse/WASD navigation, unit selection, and a tactical information panel backed
-by the SQLite-authored order of battle. See `docs\A2.2.md` for the acceptance
-test. The completed A1 milestone is documented in `docs\A1.md`.
+A3.2 loads the 40 by 40 Point Alpha elevation map plus database-compiled unit
+types, formations, and scenario units from the bootable disk. It provides fast
+horizontal and vertical map panning, mouse edge-scrolling, WASD navigation,
+unit selection, and a tactical information panel backed by SQLite. See
+`docs\A3.2.md` for the
+acceptance test. Earlier milestones remain documented under `docs`.
 
 ## A2.1 relational data foundation
 
@@ -63,6 +64,28 @@ The Amiga runtime now reads `unit_types.bin`, `formations.bin`, and
 morale, suppression, readiness, and movement values shown by the tactical
 display all originate in SQLite. The disk no longer carries or uses the legacy
 A1 `units.bin` and `scenario.bin` fixtures.
+
+## A3.1 geographic map foundation
+
+The database contains a separate 40 by 40 cell, 500-meter production grid for
+the Point Alpha-Huenfeld corridor. Its 1,600 elevations are aggregated from the
+official German BKG DGM200 terrain model. Terrain, roads, rivers, settlements,
+and bridges are independent editable cell properties. The initial grid is
+honestly marked `elevation_only`; later map passes will add and historically
+review the remaining layers before it replaces the A2 test map.
+
+The compiler produces `generated\point_alpha_map.bin`, which A3.2 loads and
+renders with elevation bands. See `docs\A3.1.md` for provenance, regeneration,
+schema, and binary-format details.
+
+## A3.2 in-game map viewer
+
+The Amiga runtime now displays the database-authored Point Alpha map and lets
+the player traverse all 1,600 cells. At a viewport edge it shifts the existing
+raster and redraws only one newly exposed row or column. The information panel
+shows the current cell's elevation and coordinates, while database-backed units
+remain selectable. The present unit locations demonstrate interaction and are
+not yet a historical scenario order of battle.
 
 ## Preserved C64 D1 prototype
 

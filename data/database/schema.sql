@@ -77,7 +77,51 @@ CREATE TABLE map (
     width INTEGER NOT NULL CHECK (width BETWEEN 1 AND 255),
     height INTEGER NOT NULL CHECK (height BETWEEN 1 AND 255),
     cell_size_m INTEGER NOT NULL CHECK (cell_size_m > 0),
+    crs TEXT NOT NULL,
+    origin_easting_m INTEGER,
+    origin_northing_m INTEGER,
+    geographic_status TEXT NOT NULL CHECK (
+        geographic_status IN ('abstract', 'elevation_draft', 'reviewed')
+    ),
     source_path TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE map_source (
+    map_source_id INTEGER PRIMARY KEY,
+    map_id INTEGER NOT NULL REFERENCES map(map_id) ON DELETE CASCADE,
+    source_key TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    source_url TEXT NOT NULL CHECK (source_url LIKE 'https://%'),
+    license_name TEXT NOT NULL,
+    attribution TEXT NOT NULL,
+    source_date TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    UNIQUE (map_id, source_key)
+);
+
+CREATE TABLE terrain_type (
+    terrain_id INTEGER PRIMARY KEY CHECK (terrain_id BETWEEN 0 AND 254),
+    terrain_key TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL UNIQUE,
+    cover_rating INTEGER NOT NULL CHECK (cover_rating BETWEEN 0 AND 15),
+    concealment_rating INTEGER NOT NULL CHECK (concealment_rating BETWEEN 0 AND 15)
+);
+
+CREATE TABLE map_cell (
+    map_id INTEGER NOT NULL REFERENCES map(map_id) ON DELETE CASCADE,
+    x INTEGER NOT NULL CHECK (x BETWEEN 0 AND 254),
+    y INTEGER NOT NULL CHECK (y BETWEEN 0 AND 254),
+    terrain_id INTEGER NOT NULL REFERENCES terrain_type(terrain_id),
+    elevation_m INTEGER NOT NULL CHECK (elevation_m BETWEEN -500 AND 9000),
+    road_class INTEGER NOT NULL DEFAULT 0 CHECK (road_class BETWEEN 0 AND 3),
+    river_class INTEGER NOT NULL DEFAULT 0 CHECK (river_class BETWEEN 0 AND 3),
+    settlement_level INTEGER NOT NULL DEFAULT 0 CHECK (settlement_level BETWEEN 0 AND 3),
+    has_bridge INTEGER NOT NULL DEFAULT 0 CHECK (has_bridge IN (0, 1)),
+    source_status TEXT NOT NULL CHECK (
+        source_status IN ('abstract', 'elevation_only', 'draft', 'reviewed')
+    ),
+    notes TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (map_id, x, y)
 );
 
 CREATE TABLE scenario (
@@ -131,6 +175,7 @@ CREATE TABLE scenario_unit (
 
 CREATE INDEX idx_unit_type_nation ON unit_type(nation_id);
 CREATE INDEX idx_unit_type_category ON unit_type(category_id);
+CREATE INDEX idx_map_cell_terrain ON map_cell(map_id, terrain_id);
 CREATE INDEX idx_formation_parent ON formation(scenario_id, parent_formation_id);
 CREATE INDEX idx_scenario_unit_formation ON scenario_unit(scenario_id, formation_id);
 CREATE INDEX idx_scenario_unit_position ON scenario_unit(scenario_id, x, y);

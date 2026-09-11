@@ -18,11 +18,14 @@ DATABASE_PATH = DATABASE_DIRECTORY / "battfulda.sqlite"
 SCHEMA_PATH = DATABASE_DIRECTORY / "schema.sql"
 SEED_PATH = DATABASE_DIRECTORY / "seed.sql"
 SCENARIO_SEED_PATH = DATABASE_DIRECTORY / "scenario_seed.sql"
+MAP_SEED_PATH = DATABASE_DIRECTORY / "map_seed.sql"
 UNIT_TYPES_PATH = ROOT / "data" / "units" / "unit_types.csv"
+MAP_CELLS_PATH = ROOT / "data" / "maps" / "point_alpha_cells.csv"
 EXPORT_DIRECTORY = DATABASE_DIRECTORY / "exports"
 OUTPUT_DIRECTORY = ROOT / "generated"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_SCENARIO = "a2_command_post"
+DEFAULT_PRODUCTION_MAP = "point_alpha_corridor"
 
 
 class DataError(ValueError):
@@ -143,6 +146,49 @@ def import_unit_types(connection: sqlite3.Connection, path: Path = UNIT_TYPES_PA
     return len(records)
 
 
+def import_map_cells(connection: sqlite3.Connection, path: Path = MAP_CELLS_PATH) -> int:
+    try:
+        source = path.open("r", encoding="utf-8", newline="")
+    except OSError as error:
+        raise DataError(f"Cannot read {path.relative_to(ROOT)}: {error}") from error
+    expected_fields = {
+        "map_key", "x", "y", "elevation_m", "terrain_key", "road_class",
+        "river_class", "settlement_level", "has_bridge", "source_status", "notes",
+    }
+    map_ids = lookup(connection, "map", "map_id", "map_key")
+    terrain_ids = lookup(connection, "terrain_type", "terrain_id", "terrain_key")
+    with source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames is None or set(reader.fieldnames) != expected_fields:
+            raise DataError("point_alpha_cells.csv columns do not match the map import schema")
+        records = list(reader)
+    insert_sql = """
+        INSERT INTO map_cell(
+            map_id, x, y, terrain_id, elevation_m, road_class, river_class,
+            settlement_level, has_bridge, source_status, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    for record in records:
+        try:
+            map_id = map_ids[record["map_key"]]
+            terrain_id = terrain_ids[record["terrain_key"]]
+            values = (
+                map_id, int(record["x"]), int(record["y"]), terrain_id,
+                int(record["elevation_m"]), int(record["road_class"]),
+                int(record["river_class"]), int(record["settlement_level"]),
+                int(record["has_bridge"]), record["source_status"], record["notes"],
+            )
+        except (KeyError, ValueError) as error:
+            raise DataError(f"Invalid map cell record: {record}") from error
+        try:
+            connection.execute(insert_sql, values)
+        except sqlite3.IntegrityError as error:
+            raise DataError(
+                f"Invalid or duplicate map cell ({record.get('x')}, {record.get('y')}): {error}"
+            ) from error
+    return len(records)
+
+
 def initialize_database(path: Path = DATABASE_PATH, force: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and not force:
@@ -155,6 +201,8 @@ def initialize_database(path: Path = DATABASE_PATH, force: bool = False) -> None
             connection.executescript(read_sql(SCHEMA_PATH))
             connection.executescript(read_sql(SEED_PATH))
             import_unit_types(connection)
+            connection.executescript(read_sql(MAP_SEED_PATH))
+            import_map_cells(connection)
             connection.executescript(read_sql(SCENARIO_SEED_PATH))
             connection.commit()
         finally:
@@ -188,6 +236,8 @@ def validate_database(path: Path = DATABASE_PATH) -> dict[str, int]:
         formation_count = scalar(connection, "SELECT COUNT(*) FROM formation")
         unit_count = scalar(connection, "SELECT COUNT(*) FROM scenario_unit")
         scenario_count = scalar(connection, "SELECT COUNT(*) FROM scenario")
+        map_count = scalar(connection, "SELECT COUNT(*) FROM map")
+        map_cell_count = scalar(connection, "SELECT COUNT(*) FROM map_cell")
         if not unit_type_count or not scenario_count:
             raise DataError("Database requires unit types and at least one scenario")
         runtime_ids = [row[0] for row in connection.execute(
@@ -228,6 +278,24 @@ def validate_database(path: Path = DATABASE_PATH) -> dict[str, int]:
         if bad_unit_types or bad_formations or bad_units or bad_scenarios:
             raise DataError("Database contains inconsistent faction, scenario, or map relationships")
 
+        bad_map_cells = scalar(connection, """
+            SELECT COUNT(*) FROM map_cell mc JOIN map m ON m.map_id = mc.map_id
+            WHERE mc.x >= m.width OR mc.y >= m.height
+        """)
+        incomplete_maps = scalar(connection, """
+            SELECT COUNT(*) FROM map m
+            WHERE m.geographic_status <> 'abstract'
+              AND (SELECT COUNT(*) FROM map_cell mc WHERE mc.map_id = m.map_id)
+                  <> m.width * m.height
+        """)
+        unsourced_maps = scalar(connection, """
+            SELECT COUNT(*) FROM map m
+            WHERE m.geographic_status <> 'abstract'
+              AND NOT EXISTS (SELECT 1 FROM map_source ms WHERE ms.map_id = m.map_id)
+        """)
+        if bad_map_cells or incomplete_maps or unsourced_maps:
+            raise DataError("Database contains incomplete, out-of-bounds, or unsourced map data")
+
         for formation in connection.execute(
             "SELECT scenario_id, formation_id, parent_formation_id FROM formation"
         ):
@@ -250,6 +318,8 @@ def validate_database(path: Path = DATABASE_PATH) -> dict[str, int]:
         "scenarios": scenario_count,
         "formations": formation_count,
         "scenario_units": unit_count,
+        "maps": map_count,
+        "map_cells": map_cell_count,
     }
 
 
@@ -297,6 +367,50 @@ def export_database(path: Path = DATABASE_PATH, output: Path = EXPORT_DIRECTORY)
             FROM v_scenario_order_of_battle
             ORDER BY scenario_key, scenario_unit_id
         """)
+        write_query_csv(connection, output / "maps.csv", """
+            SELECT map_id, map_key, display_name, width, height, cell_size_m,
+                   crs, origin_easting_m, origin_northing_m, geographic_status,
+                   source_path
+            FROM map ORDER BY map_id
+        """)
+        write_query_csv(connection, output / "map_sources.csv", """
+            SELECT m.map_key, ms.source_key, ms.display_name, ms.source_url,
+                   ms.license_name, ms.attribution, ms.source_date, ms.notes
+            FROM map_source ms JOIN map m ON m.map_id = ms.map_id
+            ORDER BY m.map_id, ms.map_source_id
+        """)
+        write_query_csv(connection, output / "terrain_types.csv",
+                        "SELECT * FROM terrain_type ORDER BY terrain_id")
+        write_query_csv(connection, output / "map_cells.csv", """
+            SELECT m.map_key, mc.x, mc.y, tt.terrain_key, mc.elevation_m,
+                   mc.road_class, mc.river_class, mc.settlement_level,
+                   mc.has_bridge, mc.source_status, mc.notes
+            FROM map_cell mc JOIN map m ON m.map_id = mc.map_id
+            JOIN terrain_type tt ON tt.terrain_id = mc.terrain_id
+            ORDER BY m.map_id, mc.y, mc.x
+        """)
+
+
+def save_map_seed(
+    path: Path = DATABASE_PATH,
+    map_key: str = DEFAULT_PRODUCTION_MAP,
+    output: Path = MAP_CELLS_PATH,
+) -> None:
+    validate_database(path)
+    with closing(connect(path)) as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM map WHERE map_key = ?", (map_key,)
+        ).fetchone()
+        if not exists:
+            raise DataError(f"Unknown map: {map_key}")
+        write_query_csv(connection, output, """
+            SELECT m.map_key, mc.x, mc.y, mc.elevation_m, tt.terrain_key,
+                   mc.road_class, mc.river_class, mc.settlement_level,
+                   mc.has_bridge, mc.source_status, mc.notes
+            FROM map_cell mc JOIN map m ON m.map_id = mc.map_id
+            JOIN terrain_type tt ON tt.terrain_id = mc.terrain_id
+            WHERE m.map_key = ? ORDER BY mc.y, mc.x
+        """, (map_key,))
 
 
 def encoded_label(value: str, field: str) -> bytes:
@@ -409,10 +523,44 @@ def compile_scenario(connection: sqlite3.Connection, scenario_key: str) -> bytes
     return header + records + strings
 
 
+def compile_map(connection: sqlite3.Connection, map_key: str) -> bytes:
+    game_map = connection.execute(
+        "SELECT * FROM map WHERE map_key = ?", (map_key,)
+    ).fetchone()
+    if game_map is None:
+        raise DataError(f"Unknown map: {map_key}")
+    if game_map["origin_easting_m"] is None or game_map["origin_northing_m"] is None:
+        raise DataError(f"Map {map_key} has no projected origin")
+    cells = list(connection.execute("""
+        SELECT terrain_id, elevation_m, road_class, river_class,
+               settlement_level, has_bridge
+        FROM map_cell WHERE map_id = ? ORDER BY y, x
+    """, (game_map["map_id"],)))
+    expected = game_map["width"] * game_map["height"]
+    if len(cells) != expected:
+        raise DataError(f"Map {map_key} has {len(cells)} cells; expected {expected}")
+    record_format = ">BhBBBB"
+    records = b"".join(
+        struct.pack(
+            record_format, row["terrain_id"], row["elevation_m"],
+            row["road_class"], row["river_class"], row["settlement_level"],
+            row["has_bridge"],
+        )
+        for row in cells
+    )
+    header = struct.pack(
+        ">4sBBBBBHII", b"BFMP", 1, game_map["map_id"], game_map["width"],
+        game_map["height"], struct.calcsize(record_format), game_map["cell_size_m"],
+        game_map["origin_easting_m"], game_map["origin_northing_m"],
+    )
+    return header + records
+
+
 def compile_database_assets(
     path: Path = DATABASE_PATH,
     output: Path = OUTPUT_DIRECTORY,
     scenario_key: str = DEFAULT_SCENARIO,
+    map_key: str = DEFAULT_PRODUCTION_MAP,
 ) -> dict[str, bytes]:
     validate_database(path)
     with closing(connect(path)) as connection:
@@ -420,6 +568,7 @@ def compile_database_assets(
             "unit_types.bin": compile_unit_types(connection),
             "formations.bin": compile_formations(connection, scenario_key),
             "a2_scenario.bin": compile_scenario(connection, scenario_key),
+            "point_alpha_map.bin": compile_map(connection, map_key),
         }
     output.mkdir(parents=True, exist_ok=True)
     for name, contents in assets.items():
@@ -438,8 +587,14 @@ def main(argv: Iterable[str] | None = None) -> int:
     init_parser.add_argument("--force", action="store_true", help="replace an existing database")
     subparsers.add_parser("validate", help="validate relationships and runtime limits")
     subparsers.add_parser("export", help="write deterministic CSV snapshots")
+    save_map_parser = subparsers.add_parser(
+        "save-map", help="save SQLiteStudio map edits to the reproducible map CSV"
+    )
+    save_map_parser.add_argument("--map", default=DEFAULT_PRODUCTION_MAP)
+    save_map_parser.add_argument("--output", type=Path, default=MAP_CELLS_PATH)
     compile_parser = subparsers.add_parser("compile", help="compile Amiga database assets")
     compile_parser.add_argument("--scenario", default=DEFAULT_SCENARIO)
+    compile_parser.add_argument("--map", default=DEFAULT_PRODUCTION_MAP)
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     try:
@@ -453,8 +608,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         elif args.command == "export":
             export_database()
             print(f"Exported database snapshots to {EXPORT_DIRECTORY.relative_to(ROOT)}")
+        elif args.command == "save-map":
+            save_map_seed(map_key=args.map, output=args.output)
+            print(f"Saved map seed to {args.output}")
         elif args.command == "compile":
-            assets = compile_database_assets(scenario_key=args.scenario)
+            assets = compile_database_assets(scenario_key=args.scenario, map_key=args.map)
             for name, contents in assets.items():
                 print(f"Generated {name}: {len(contents)} bytes")
     except (DataError, OSError, sqlite3.Error, struct.error) as error:

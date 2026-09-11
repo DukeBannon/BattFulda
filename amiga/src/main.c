@@ -19,7 +19,9 @@
 #define CELL_SIZE 16
 #define VIEW_WIDTH 20
 #define VIEW_HEIGHT 11
-#define MAX_MAP_CELLS 300
+#define EDGE_SCROLL_MARGIN 16
+#define MAX_MAP_CELLS 4096
+#define MAP_DATA_SIZE 16384
 #define MAX_UNITS 64
 #define MAX_UNIT_TYPES 96
 #define MAX_FORMATIONS 64
@@ -28,10 +30,11 @@
 #define SCENARIO_DATA_SIZE 1024
 
 #define TILE_CLEAR 0
-#define TILE_ROAD 1
-#define TILE_WOODS 2
-#define TILE_WATER 3
-#define TILE_TOWN 4
+#define TILE_WOODS 1
+#define TILE_ROUGH 2
+#define TILE_MARSH 3
+#define TILE_WATER 4
+#define TILE_URBAN 5
 
 #define COLOR_BACKGROUND 0
 #define COLOR_TEXT 1
@@ -47,6 +50,8 @@
 #define COLOR_WARSAW 11
 #define COLOR_BLACK 12
 #define COLOR_WHITE 13
+#define COLOR_HIGH_GROUND 14
+#define COLOR_HIGHEST_GROUND 15
 
 struct ExecBase *SysBase;
 struct GfxBase *GfxBase;
@@ -64,6 +69,15 @@ struct TacticalUnit {
     UBYTE suppression;
     UBYTE readiness;
     const char *name;
+};
+
+struct MapCell {
+    UBYTE terrain;
+    WORD elevation;
+    UBYTE road_class;
+    UBYTE river_class;
+    UBYTE settlement_level;
+    UBYTE has_bridge;
 };
 
 struct UnitType {
@@ -97,7 +111,11 @@ static struct Screen *game_screen;
 static struct Window *game_window;
 static UBYTE map_width;
 static UBYTE map_height;
-static UBYTE map_tiles[MAX_MAP_CELLS];
+static UWORD map_cell_size;
+static ULONG map_origin_easting;
+static ULONG map_origin_northing;
+static UBYTE map_data[MAP_DATA_SIZE];
+static struct MapCell map_cells[MAX_MAP_CELLS];
 static UBYTE unit_type_data[UNIT_TYPE_DATA_SIZE];
 static UBYTE formation_data[FORMATION_DATA_SIZE];
 static UBYTE scenario_data[SCENARIO_DATA_SIZE];
@@ -109,14 +127,15 @@ static UBYTE formation_count;
 static UBYTE unit_count;
 static UBYTE cursor_x;
 static UBYTE cursor_y;
+static UBYTE camera_x;
 static UBYTE camera_y;
 static BYTE selected_unit = -1;
 static const char *load_error = "UNKNOWN DATA ERROR";
 
 static const char *const terrain_names[] = {
-    "CLEAR", "ROAD", "WOODS", "WATER", "TOWN"
+    "CLEAR", "WOODS", "ROUGH", "MARSH", "WATER", "URBAN"
 };
-static const UBYTE terrain_lengths[] = {5, 4, 5, 5, 4};
+static const UBYTE terrain_lengths[] = {5, 5, 5, 5, 5, 5};
 static const char *const side_names[] = {"NATO", "WARSAW PACT"};
 static const UBYTE side_lengths[] = {4, 11};
 
@@ -128,7 +147,7 @@ static void draw_text(struct RastPort *rp, WORD x, WORD y,
     Text(rp, (CONST_STRPTR)text, length);
 }
 
-static UBYTE format_number(UBYTE value, char *buffer)
+static UBYTE format_number(UWORD value, char *buffer)
 {
     UBYTE length = 0;
     if (value >= 100) {
@@ -145,6 +164,12 @@ static UBYTE format_number(UBYTE value, char *buffer)
 static UWORD read_be16(const UBYTE *source)
 {
     return ((UWORD)source[0] << 8) | source[1];
+}
+
+static ULONG read_be32(const UBYTE *source)
+{
+    return ((ULONG)source[0] << 24) | ((ULONG)source[1] << 16) |
+           ((ULONG)source[2] << 8) | source[3];
 }
 
 static BOOL has_magic(const UBYTE *data, const char *magic)
@@ -179,29 +204,46 @@ static BOOL read_file(const char *name, UBYTE *buffer, LONG capacity, LONG *size
 
 static BOOL load_map_data(void)
 {
-    static UBYTE buffer[512];
     LONG size;
+    UWORD index;
     UWORD source;
     UWORD cell_count;
 
-    if (!read_file("map.bin", buffer, sizeof(buffer), &size) || size < 2) {
-        load_error = "MAP.BIN MISSING OR SHORT";
+    if (!read_file("point_alpha_map.bin", map_data, sizeof(map_data), &size) ||
+        size < 19) {
+        load_error = "POINT_ALPHA_MAP.BIN MISSING";
         return FALSE;
     }
-    map_width = buffer[0];
-    map_height = buffer[1];
+    map_width = map_data[6];
+    map_height = map_data[7];
+    map_cell_size = read_be16(&map_data[9]);
+    map_origin_easting = read_be32(&map_data[11]);
+    map_origin_northing = read_be32(&map_data[15]);
     cell_count = (UWORD)map_width * map_height;
-    if (map_width != VIEW_WIDTH || map_height < VIEW_HEIGHT ||
-        cell_count > MAX_MAP_CELLS || size != (LONG)cell_count + 2) {
-        load_error = "MAP.BIN FORMAT ERROR";
+    if (!has_magic(map_data, "BFMP") || map_data[4] != 1 ||
+        map_width < VIEW_WIDTH || map_height < VIEW_HEIGHT ||
+        map_data[8] != 7 || map_cell_size != 500 ||
+        !map_origin_easting || !map_origin_northing ||
+        cell_count > MAX_MAP_CELLS || size != 19 + (LONG)cell_count * 7) {
+        load_error = "POINT ALPHA MAP FORMAT ERROR";
         return FALSE;
     }
-    for (source = 0; source < cell_count; ++source) {
-        if (buffer[source + 2] > TILE_TOWN) {
-            load_error = "MAP.BIN TERRAIN ERROR";
+    source = 19;
+    for (index = 0; index < cell_count; ++index) {
+        struct MapCell *cell = &map_cells[index];
+        cell->terrain = map_data[source++];
+        cell->elevation = (WORD)read_be16(&map_data[source]);
+        source += 2;
+        cell->road_class = map_data[source++];
+        cell->river_class = map_data[source++];
+        cell->settlement_level = map_data[source++];
+        cell->has_bridge = map_data[source++];
+        if (cell->terrain > TILE_URBAN || cell->road_class > 3 ||
+            cell->river_class > 3 || cell->settlement_level > 3 ||
+            cell->has_bridge > 1) {
+            load_error = "POINT ALPHA MAP CELL ERROR";
             return FALSE;
         }
-        map_tiles[source] = buffer[source + 2];
     }
     return TRUE;
 }
@@ -345,6 +387,7 @@ static BOOL load_scenario(void)
             return FALSE;
         }
     }
+    camera_x = cursor_x >= VIEW_WIDTH ? cursor_x - VIEW_WIDTH + 1 : 0;
     camera_y = cursor_y >= VIEW_HEIGHT ? cursor_y - VIEW_HEIGHT + 1 : 0;
     return TRUE;
 }
@@ -365,9 +408,14 @@ static BYTE unit_at(UBYTE x, UBYTE y)
     return -1;
 }
 
+static struct MapCell *map_cell_at(UBYTE x, UBYTE y)
+{
+    return &map_cells[(UWORD)y * map_width + x];
+}
+
 static UBYTE tile_at(UBYTE x, UBYTE y)
 {
-    return map_tiles[(UWORD)y * map_width + x];
+    return map_cell_at(x, y)->terrain;
 }
 
 static void draw_box(struct RastPort *rp, WORD left, WORD top, WORD right,
@@ -381,14 +429,18 @@ static void draw_box(struct RastPort *rp, WORD left, WORD top, WORD right,
     Draw(rp, left, top);
 }
 
-static void draw_terrain(struct RastPort *rp, UBYTE tile, WORD left, WORD top)
+static void draw_terrain(struct RastPort *rp, const struct MapCell *cell,
+                         WORD left, WORD top)
 {
-    UWORD fill = COLOR_CLEAR;
-    if (tile == TILE_ROAD) fill = COLOR_ROAD;
-    else if (tile == TILE_WOODS) fill = COLOR_WOODS;
-    else if (tile == TILE_WATER) fill = COLOR_WATER;
-    else if (tile == TILE_TOWN) fill = COLOR_TOWN;
-    else if (((left >> 4) + (top >> 4)) & 1) fill = COLOR_CLEAR_ALT;
+    UWORD fill;
+    if (cell->elevation < 300) fill = COLOR_CLEAR;
+    else if (cell->elevation < 400) fill = COLOR_CLEAR_ALT;
+    else if (cell->elevation < 500) fill = COLOR_HIGH_GROUND;
+    else fill = COLOR_HIGHEST_GROUND;
+    if (cell->terrain == TILE_WOODS) fill = COLOR_WOODS;
+    else if (cell->terrain == TILE_MARSH || cell->terrain == TILE_WATER)
+        fill = COLOR_WATER;
+    else if (cell->terrain == TILE_URBAN) fill = COLOR_TOWN;
 
     SetAPen(rp, fill);
     RectFill(rp, left + 1, top + 1, left + CELL_SIZE - 2,
@@ -396,21 +448,32 @@ static void draw_terrain(struct RastPort *rp, UBYTE tile, WORD left, WORD top)
     draw_box(rp, left, top, left + CELL_SIZE - 1,
              top + CELL_SIZE - 1, COLOR_GRID);
 
-    if (tile == TILE_ROAD) {
-        SetAPen(rp, COLOR_TEXT);
+    if (cell->road_class) {
+        SetAPen(rp, COLOR_ROAD);
         Move(rp, left + 1, top + 8);
         Draw(rp, left + 14, top + 8);
-    } else if (tile == TILE_WOODS) {
+    }
+    if (cell->river_class) {
+        SetAPen(rp, COLOR_WATER);
+        Move(rp, left + 8, top + 1);
+        Draw(rp, left + 8, top + 14);
+    }
+    if (cell->terrain == TILE_ROUGH) {
+        SetAPen(rp, COLOR_TEXT);
+        Move(rp, left + 3, top + 11);
+        Draw(rp, left + 7, top + 5);
+        Draw(rp, left + 12, top + 11);
+    } else if (cell->terrain == TILE_WOODS) {
         SetAPen(rp, COLOR_CLEAR_ALT);
         RectFill(rp, left + 4, top + 3, left + 6, top + 7);
         RectFill(rp, left + 9, top + 6, left + 11, top + 10);
-    } else if (tile == TILE_WATER) {
+    } else if (cell->terrain == TILE_WATER) {
         SetAPen(rp, COLOR_WHITE);
         Move(rp, left + 2, top + 6);
         Draw(rp, left + 6, top + 6);
         Move(rp, left + 8, top + 10);
         Draw(rp, left + 13, top + 10);
-    } else if (tile == TILE_TOWN) {
+    } else if (cell->terrain == TILE_URBAN || cell->settlement_level) {
         SetAPen(rp, COLOR_BLACK);
         RectFill(rp, left + 4, top + 4, left + 11, top + 12);
         SetAPen(rp, COLOR_TEXT);
@@ -438,17 +501,18 @@ static void draw_cell(struct RastPort *rp, UBYTE map_x, UBYTE map_y)
     BYTE unit;
     WORD left;
     WORD top;
-    if (map_y < camera_y || map_y >= camera_y + VIEW_HEIGHT) return;
-    left = MAP_LEFT + ((WORD)map_x << 4);
+    if (map_x < camera_x || map_x >= camera_x + VIEW_WIDTH ||
+        map_y < camera_y || map_y >= camera_y + VIEW_HEIGHT) return;
+    left = MAP_LEFT + ((WORD)(map_x - camera_x) << 4);
     top = MAP_TOP + ((WORD)(map_y - camera_y) << 4);
-    draw_terrain(rp, tile_at(map_x, map_y), left, top);
+    draw_terrain(rp, map_cell_at(map_x, map_y), left, top);
     unit = unit_at(map_x, map_y);
     if (unit >= 0) draw_unit(rp, unit, left, top);
 }
 
 static void draw_cursor(struct RastPort *rp)
 {
-    WORD left = MAP_LEFT + ((WORD)cursor_x << 4);
+    WORD left = MAP_LEFT + ((WORD)(cursor_x - camera_x) << 4);
     WORD top = MAP_TOP + ((WORD)(cursor_y - camera_y) << 4);
     draw_box(rp, left, top, left + CELL_SIZE - 1,
              top + CELL_SIZE - 1, COLOR_HIGHLIGHT);
@@ -501,6 +565,7 @@ static void draw_panel(struct RastPort *rp)
     char number[3];
     UBYTE length;
     UBYTE tile = tile_at(cursor_x, cursor_y);
+    struct MapCell *cursor_cell = map_cell_at(cursor_x, cursor_y);
     clear_panel(rp);
     draw_text(rp, 384, 58, "TACTICAL DISPLAY", 16, COLOR_HIGHLIGHT);
 
@@ -530,28 +595,47 @@ static void draw_panel(struct RastPort *rp)
         draw_value(rp, 206, "READINESS:", 10, number, length);
         length = format_number(type->move, number);
         draw_value(rp, 222, "MOVE:", 5, number, length);
+        length = format_number((UWORD)map_cell_at(unit->x, unit->y)->elevation,
+                               number);
+        draw_text(rp, 536, 222, "ELEV:", 5, COLOR_TEXT);
+        draw_text(rp, 584, 222, number, length, COLOR_WHITE);
         draw_value(rp, 238, "TERRAIN:", 8, terrain_names[tile],
                    terrain_lengths[tile]);
     } else {
         draw_text(rp, 384, 86, "NO UNIT SELECTED", 16, COLOR_TEXT);
         draw_value(rp, 110, "TERRAIN:", 8, terrain_names[tile],
                    terrain_lengths[tile]);
-        draw_text(rp, 384, 150, "MOUSE/WASD: MOVE", 16, COLOR_TEXT);
-        draw_text(rp, 384, 166, "LEFT CLICK/ENTER: SELECT", 24, COLOR_TEXT);
-        draw_text(rp, 384, 182, "ESC: EXIT", 9, COLOR_TEXT);
+        length = format_number((UWORD)cursor_cell->elevation, number);
+        draw_value(rp, 126, "ELEVATION:", 10, number, length);
+        length = format_number(cursor_x, number);
+        draw_value(rp, 142, "CELL X:", 7, number, length);
+        length = format_number(cursor_y, number);
+        draw_value(rp, 158, "CELL Y:", 7, number, length);
+        draw_text(rp, 384, 182, "MOUSE/WASD: MOVE", 16, COLOR_TEXT);
+        draw_text(rp, 384, 198, "LEFT CLICK/ENTER: SELECT", 24, COLOR_TEXT);
+        draw_text(rp, 384, 214, "ESC: EXIT", 9, COLOR_TEXT);
     }
 
     if (selected_unit < 0)
-        draw_text(rp, 384, 246, "A2.2 DATABASE RUNTIME", 21, COLOR_HIGHLIGHT);
+        draw_text(rp, 384, 246, "A3.2 MAP VIEWER", 15, COLOR_HIGHLIGHT);
 }
 
-static void update_cursor_terrain(struct RastPort *rp)
+static void update_cursor_details(struct RastPort *rp)
 {
+    char number[3];
+    UBYTE length;
     UBYTE tile = tile_at(cursor_x, cursor_y);
+    struct MapCell *cell = map_cell_at(cursor_x, cursor_y);
     SetAPen(rp, COLOR_BACKGROUND);
-    RectFill(rp, 488, 98, 624, 112);
+    RectFill(rp, 488, 98, 624, 160);
     draw_text(rp, 488, 110, terrain_names[tile], terrain_lengths[tile],
               COLOR_WHITE);
+    length = format_number((UWORD)cell->elevation, number);
+    draw_text(rp, 488, 126, number, length, COLOR_WHITE);
+    length = format_number(cursor_x, number);
+    draw_text(rp, 488, 142, number, length, COLOR_WHITE);
+    length = format_number(cursor_y, number);
+    draw_text(rp, 488, 158, number, length, COLOR_WHITE);
 }
 
 static void draw_map(struct RastPort *rp)
@@ -560,8 +644,42 @@ static void draw_map(struct RastPort *rp)
     UBYTE view_y;
     for (view_y = 0; view_y < VIEW_HEIGHT; ++view_y) {
         for (x = 0; x < VIEW_WIDTH; ++x)
-            draw_cell(rp, x, camera_y + view_y);
+            draw_cell(rp, camera_x + x, camera_y + view_y);
     }
+    draw_cursor(rp);
+}
+
+static void scroll_map(struct RastPort *rp, UBYTE old_camera_x,
+                       UBYTE old_camera_y, UBYTE old_cursor_x,
+                       UBYTE old_cursor_y)
+{
+    UBYTE index;
+    WORD delta_x = (WORD)camera_x - old_camera_x;
+    WORD delta_y = (WORD)camera_y - old_camera_y;
+    WORD right = MAP_LEFT + VIEW_WIDTH * CELL_SIZE - 1;
+    WORD bottom = MAP_TOP + VIEW_HEIGHT * CELL_SIZE - 1;
+
+    SetBPen(rp, COLOR_BACKGROUND);
+    if (delta_y == 0 && (delta_x == 1 || delta_x == -1)) {
+        ScrollRaster(rp, delta_x * CELL_SIZE, 0, MAP_LEFT, MAP_TOP,
+                     right, bottom);
+        for (index = 0; index < VIEW_HEIGHT; ++index)
+            draw_cell(rp,
+                      delta_x > 0 ? camera_x + VIEW_WIDTH - 1 : camera_x,
+                      camera_y + index);
+    } else if (delta_x == 0 && (delta_y == 1 || delta_y == -1)) {
+        ScrollRaster(rp, 0, delta_y * CELL_SIZE, MAP_LEFT, MAP_TOP,
+                     right, bottom);
+        for (index = 0; index < VIEW_WIDTH; ++index)
+            draw_cell(rp, camera_x + index,
+                      delta_y > 0 ? camera_y + VIEW_HEIGHT - 1 : camera_y);
+    } else {
+        draw_map(rp);
+        return;
+    }
+
+    /* The old cursor moved with the raster; restore the cell beneath it. */
+    draw_cell(rp, old_cursor_x, old_cursor_y);
     draw_cursor(rp);
 }
 
@@ -569,7 +687,7 @@ static void draw_scene(struct RastPort *rp)
 {
     SetRast(rp, COLOR_BACKGROUND);
     draw_text(rp, 24, 22, "BATTALION: FULDA", 16, COLOR_HIGHLIGHT);
-    draw_text(rp, 24, 37, "FULDA GAP - A2.2", 16, COLOR_TEXT);
+    draw_text(rp, 24, 37, "POINT ALPHA MAP - A3.2", 22, COLOR_TEXT);
     draw_map(rp);
     draw_panel(rp);
 }
@@ -578,24 +696,31 @@ static void move_cursor(struct RastPort *rp, UBYTE x, UBYTE y)
 {
     UBYTE old_x = cursor_x;
     UBYTE old_y = cursor_y;
-    UBYTE old_camera = camera_y;
+    UBYTE old_camera_x = camera_x;
+    UBYTE old_camera_y = camera_y;
+    UBYTE maximum_camera_x = map_width - VIEW_WIDTH;
     UBYTE maximum_camera = map_height - VIEW_HEIGHT;
     if (x >= map_width || y >= map_height) return;
     if (x == cursor_x && y == cursor_y) return;
 
     cursor_x = x;
     cursor_y = y;
+    if (cursor_x < camera_x) camera_x = cursor_x;
+    else if (cursor_x >= camera_x + VIEW_WIDTH)
+        camera_x = cursor_x - VIEW_WIDTH + 1;
+    if (camera_x > maximum_camera_x) camera_x = maximum_camera_x;
     if (cursor_y < camera_y) camera_y = cursor_y;
     else if (cursor_y >= camera_y + VIEW_HEIGHT)
         camera_y = cursor_y - VIEW_HEIGHT + 1;
     if (camera_y > maximum_camera) camera_y = maximum_camera;
 
-    if (camera_y != old_camera) draw_map(rp);
+    if (camera_x != old_camera_x || camera_y != old_camera_y)
+        scroll_map(rp, old_camera_x, old_camera_y, old_x, old_y);
     else {
         draw_cell(rp, old_x, old_y);
         draw_cursor(rp);
     }
-    if (selected_unit < 0) update_cursor_terrain(rp);
+    if (selected_unit < 0) update_cursor_details(rp);
 }
 
 static void select_unit(struct RastPort *rp)
@@ -625,6 +750,41 @@ static void cancel_selection(struct RastPort *rp)
     }
 }
 
+static BOOL mouse_map_cell(WORD mouse_x, WORD mouse_y,
+                           UBYTE *map_x, UBYTE *map_y)
+{
+    if (mouse_x < MAP_LEFT || mouse_y < MAP_TOP ||
+        mouse_x >= MAP_LEFT + VIEW_WIDTH * CELL_SIZE ||
+        mouse_y >= MAP_TOP + VIEW_HEIGHT * CELL_SIZE) return FALSE;
+    *map_x = camera_x + (UBYTE)((mouse_x - MAP_LEFT) / CELL_SIZE);
+    *map_y = camera_y + (UBYTE)((mouse_y - MAP_TOP) / CELL_SIZE);
+    return *map_x < map_width && *map_y < map_height;
+}
+
+static void update_mouse_pan(WORD mouse_x, WORD mouse_y,
+                             BYTE *pan_x, BYTE *pan_y)
+{
+    WORD map_right = MAP_LEFT + VIEW_WIDTH * CELL_SIZE;
+    WORD map_bottom = MAP_TOP + VIEW_HEIGHT * CELL_SIZE;
+    *pan_x = 0;
+    *pan_y = 0;
+
+    if (mouse_y >= MAP_TOP && mouse_y < map_bottom) {
+        if (mouse_x >= MAP_LEFT - EDGE_SCROLL_MARGIN && mouse_x < MAP_LEFT)
+            *pan_x = -1;
+        else if (mouse_x >= map_right &&
+                 mouse_x < map_right + EDGE_SCROLL_MARGIN)
+            *pan_x = 1;
+    }
+    if (mouse_x >= MAP_LEFT && mouse_x < map_right) {
+        if (mouse_y >= MAP_TOP - EDGE_SCROLL_MARGIN && mouse_y < MAP_TOP)
+            *pan_y = -1;
+        else if (mouse_y >= map_bottom &&
+                 mouse_y < map_bottom + EDGE_SCROLL_MARGIN)
+            *pan_y = 1;
+    }
+}
+
 static BOOL open_display(void)
 {
     static const struct TagItem screen_tags[] = {
@@ -638,7 +798,8 @@ static BOOL open_display(void)
         {WA_Width, SCREEN_WIDTH}, {WA_Height, SCREEN_HEIGHT},
         {WA_Backdrop, TRUE}, {WA_Borderless, TRUE}, {WA_Activate, TRUE},
         {WA_RMBTrap, TRUE}, {WA_ReportMouse, TRUE},
-        {WA_IDCMP, IDCMP_RAWKEY | IDCMP_MOUSEMOVE | IDCMP_MOUSEBUTTONS},
+        {WA_IDCMP, IDCMP_RAWKEY | IDCMP_MOUSEMOVE | IDCMP_MOUSEBUTTONS |
+                   IDCMP_INTUITICKS},
         {TAG_DONE, 0}
     };
 
@@ -666,6 +827,8 @@ static BOOL open_display(void)
     SetRGB4(&game_screen->ViewPort, COLOR_WARSAW, 14, 3, 3);
     SetRGB4(&game_screen->ViewPort, COLOR_BLACK, 0, 0, 0);
     SetRGB4(&game_screen->ViewPort, COLOR_WHITE, 15, 15, 15);
+    SetRGB4(&game_screen->ViewPort, COLOR_HIGH_GROUND, 6, 7, 3);
+    SetRGB4(&game_screen->ViewPort, COLOR_HIGHEST_GROUND, 8, 5, 2);
     return TRUE;
 }
 
@@ -683,7 +846,7 @@ static void data_error_loop(void)
     draw_text(rp, 24, 30, "BATTALION: FULDA", 16, COLOR_HIGHLIGHT);
     draw_text(rp, 24, 62, "DATA LOAD FAILED", 16, COLOR_WARSAW);
     draw_clipped(rp, 24, 86, load_error, 60, COLOR_WHITE);
-    draw_text(rp, 24, 118, "CHECK THE A2.2 DATA FILES", 25, COLOR_TEXT);
+    draw_text(rp, 24, 118, "CHECK THE A3.2 DATA FILES", 25, COLOR_TEXT);
     draw_text(rp, 24, 150, "PRESS A KEY OR MOUSE BUTTON", 27, COLOR_TEXT);
     while (waiting) {
         struct IntuiMessage *message;
@@ -700,6 +863,8 @@ static void data_error_loop(void)
 static void input_loop(void)
 {
     BOOL running = TRUE;
+    BYTE mouse_pan_x = 0;
+    BYTE mouse_pan_y = 0;
     struct RastPort *rp = game_window->RPort;
     draw_scene(rp);
 
@@ -711,17 +876,33 @@ static void input_loop(void)
             UWORD code = message->Code;
             WORD mouse_x = message->MouseX;
             WORD mouse_y = message->MouseY;
+            UBYTE map_x;
+            UBYTE map_y;
             ReplyMsg((struct Message *)message);
 
-            if (event_class == IDCMP_MOUSEMOVE &&
-                mouse_x >= MAP_LEFT && mouse_y >= MAP_TOP &&
-                mouse_x < MAP_LEFT + (VIEW_WIDTH << 4) &&
-                mouse_y < MAP_TOP + (VIEW_HEIGHT << 4)) {
-                move_cursor(rp, (UBYTE)(mouse_x - MAP_LEFT) >> 4,
-                            camera_y + ((UBYTE)(mouse_y - MAP_TOP) >> 4));
+            if (event_class == IDCMP_MOUSEMOVE) {
+                update_mouse_pan(mouse_x, mouse_y,
+                                 &mouse_pan_x, &mouse_pan_y);
+                if (mouse_map_cell(mouse_x, mouse_y, &map_x, &map_y))
+                    move_cursor(rp, map_x, map_y);
             } else if (event_class == IDCMP_MOUSEBUTTONS) {
-                if (code == SELECTDOWN) select_unit(rp);
+                if (code == SELECTDOWN &&
+                    mouse_map_cell(mouse_x, mouse_y, &map_x, &map_y)) {
+                    /* A click always acts on its cell, even if a preceding
+                       mouse-move message was coalesced or dropped. */
+                    move_cursor(rp, map_x, map_y);
+                    select_unit(rp);
+                }
                 else if (code == MENUDOWN) cancel_selection(rp);
+            } else if (event_class == IDCMP_INTUITICKS) {
+                if (mouse_pan_x < 0 && cursor_x > 0)
+                    move_cursor(rp, cursor_x - 1, cursor_y);
+                else if (mouse_pan_x > 0 && cursor_x + 1 < map_width)
+                    move_cursor(rp, cursor_x + 1, cursor_y);
+                else if (mouse_pan_y < 0 && cursor_y > 0)
+                    move_cursor(rp, cursor_x, cursor_y - 1);
+                else if (mouse_pan_y > 0 && cursor_y + 1 < map_height)
+                    move_cursor(rp, cursor_x, cursor_y + 1);
             } else if (event_class == IDCMP_RAWKEY && !(code & 0x80U)) {
                 if (code == 0x45U) {
                     if (selected_unit >= 0) cancel_selection(rp);

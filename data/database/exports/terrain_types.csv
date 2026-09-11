@@ -1,0 +1,7 @@
+terrain_id,terrain_key,display_name,cover_rating,concealment_rating
+0,clear,Clear,0,0
+1,woods,Woods,4,7
+2,rough,Rough,3,2
+3,marsh,Marsh,1,3
+4,water,Water,0,0
+5,urban,Urban,7,7

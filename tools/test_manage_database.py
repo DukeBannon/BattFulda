@@ -24,6 +24,8 @@ class DatabaseTests(unittest.TestCase):
             "scenarios": 1,
             "formations": 5,
             "scenario_units": 11,
+            "maps": 2,
+            "map_cells": 1600,
         })
         connection = manage_database.connect(self.database)
         try:
@@ -34,6 +36,17 @@ class DatabaseTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(tuple(tank), (9, 68, 1, 82))
+
+        connection = manage_database.connect(self.database)
+        try:
+            terrain = connection.execute("""
+                SELECT MIN(elevation_m), MAX(elevation_m), COUNT(*),
+                       COUNT(DISTINCT source_status)
+                FROM map_cell WHERE map_id = 1
+            """).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(tuple(terrain), (238, 691, 1600, 1))
 
     def test_compact_binary_headers_and_sizes(self) -> None:
         output = self.root / "generated"
@@ -48,10 +61,14 @@ class DatabaseTests(unittest.TestCase):
         scenario_header = struct.unpack(">4sBBBBBBBBBBH", assets["a2_scenario.bin"][:16])
         self.assertEqual(
             scenario_header,
-            (b"BFSC", 2, 0, 20, 15, 15, 9, 7, 5, 11, 11, 137),
+            (b"BFSC", 2, 0, 40, 40, 15, 8, 24, 5, 11, 11, 137),
         )
         self.assertGreater(len(assets["a2_scenario.bin"]), 16 + 11 * 11)
         self.assertIn(b"Team Alpha Headquarters\0", assets["a2_scenario.bin"])
+
+        map_header = struct.unpack(">4sBBBBBHII", assets["point_alpha_map.bin"][:19])
+        self.assertEqual(map_header, (b"BFMP", 1, 1, 40, 40, 7, 500, 554000, 5610000))
+        self.assertEqual(len(assets["point_alpha_map.bin"]), 19 + 40 * 40 * 7)
 
     def test_runtime_ids_may_repeat_in_different_scenarios(self) -> None:
         connection = manage_database.connect(self.database)
@@ -94,10 +111,21 @@ class DatabaseTests(unittest.TestCase):
             "scenarios.csv": 1,
             "formations.csv": 5,
             "scenario_units.csv": 11,
+            "maps.csv": 2,
+            "map_sources.csv": 1,
+            "terrain_types.csv": 6,
+            "map_cells.csv": 1600,
         }
         for name, expected in expected_rows.items():
             with (output / name).open(encoding="utf-8", newline="") as source:
                 self.assertEqual(len(list(csv.DictReader(source))), expected)
+
+        saved_map = self.root / "saved_map.csv"
+        manage_database.save_map_seed(self.database, output=saved_map)
+        self.assertEqual(
+            saved_map.read_text(encoding="utf-8"),
+            manage_database.MAP_CELLS_PATH.read_text(encoding="utf-8"),
+        )
 
 
 if __name__ == "__main__":

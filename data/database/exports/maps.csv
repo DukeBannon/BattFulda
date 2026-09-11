@@ -1,0 +1,3 @@
+map_id,map_key,display_name,width,height,cell_size_m,crs,origin_easting_m,origin_northing_m,geographic_status,source_path
+0,fulda_gap,Fulda Gap A2 Test Map,20,15,500,abstract,,,abstract,data/maps/fulda_gap.json
+1,point_alpha_corridor,Point Alpha - Huenfeld Corridor,40,40,500,ETRS89 / UTM zone 32N (EPSG:25832),554000,5610000,elevation_draft,data/maps/point_alpha_cells.csv
