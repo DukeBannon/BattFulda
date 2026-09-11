@@ -81,7 +81,7 @@ CREATE TABLE map (
     origin_easting_m INTEGER,
     origin_northing_m INTEGER,
     geographic_status TEXT NOT NULL CHECK (
-        geographic_status IN ('abstract', 'elevation_draft', 'reviewed')
+        geographic_status IN ('abstract', 'elevation_draft', 'feature_draft', 'reviewed')
     ),
     source_path TEXT NOT NULL UNIQUE
 );

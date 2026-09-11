@@ -23,7 +23,7 @@ UNIT_TYPES_PATH = ROOT / "data" / "units" / "unit_types.csv"
 MAP_CELLS_PATH = ROOT / "data" / "maps" / "point_alpha_cells.csv"
 EXPORT_DIRECTORY = DATABASE_DIRECTORY / "exports"
 OUTPUT_DIRECTORY = ROOT / "generated"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_SCENARIO = "a2_command_post"
 DEFAULT_PRODUCTION_MAP = "point_alpha_corridor"
 

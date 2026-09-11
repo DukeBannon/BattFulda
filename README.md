@@ -33,12 +33,12 @@ build\amiga\battalion_fulda_a3.exe
 build\amiga\battalion_fulda_a3.adf
 ```
 
-A3.2 loads the 40 by 40 Point Alpha elevation map plus database-compiled unit
+A3.3 loads the 40 by 40 Point Alpha terrain map plus database-compiled unit
 types, formations, and scenario units from the bootable disk. It provides fast
 horizontal and vertical map panning, mouse edge-scrolling, WASD navigation,
 unit selection, and a tactical information panel backed by SQLite. See
-`docs\A3.2.md` for the
-acceptance test. Earlier milestones remain documented under `docs`.
+`docs\A3.3.md` for the acceptance test. Earlier milestones remain documented
+under `docs`.
 
 ## A2.1 relational data foundation
 
@@ -71,8 +71,8 @@ The database contains a separate 40 by 40 cell, 500-meter production grid for
 the Point Alpha-Huenfeld corridor. Its 1,600 elevations are aggregated from the
 official German BKG DGM200 terrain model. Terrain, roads, rivers, settlements,
 and bridges are independent editable cell properties. The initial grid is
-honestly marked `elevation_only`; later map passes will add and historically
-review the remaining layers before it replaces the A2 test map.
+initially marked `elevation_only`; A3.3 adds modern-reference features that
+remain explicitly marked for historical review.
 
 The compiler produces `generated\point_alpha_map.bin`, which A3.2 loads and
 renders with elevation bands. See `docs\A3.1.md` for provenance, regeneration,
@@ -86,6 +86,16 @@ raster and redraws only one newly exposed row or column. The information panel
 shows the current cell's elevation and coordinates, while database-backed units
 remain selectable. The present unit locations demonstrate interaction and are
 not yet a historical scenario order of battle.
+
+## A3.3 recognizable terrain pass
+
+The production grid now combines official BKG DGM200 elevation with clipped
+BKG DLM250 roads, waterways, woodland, settlements, water, and transport
+structures. Python rasterizes the vector features into editable 500-meter
+cells; the Amiga connects neighboring road and river marks and uses clearer
+woodland, settlement, and bridge symbols. DLM250 is a modern reference layer,
+so every affected cell remains marked `draft` until compared with period
+evidence. See `docs\A3.3.md`.
 
 ## Preserved C64 D1 prototype
 

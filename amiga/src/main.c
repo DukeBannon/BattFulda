@@ -139,6 +139,35 @@ static const UBYTE terrain_lengths[] = {5, 5, 5, 5, 5, 5};
 static const char *const side_names[] = {"NATO", "WARSAW PACT"};
 static const UBYTE side_lengths[] = {4, 11};
 
+static UBYTE append_label(char *buffer, UBYTE length, UBYTE maximum,
+                          const char *label, UBYTE label_length)
+{
+    UBYTE index;
+    if (length && length < maximum) buffer[length++] = '/';
+    for (index = 0; index < label_length && length < maximum; ++index)
+        buffer[length++] = label[index];
+    return length;
+}
+
+static UBYTE format_terrain(const struct MapCell *cell, char *buffer,
+                            UBYTE maximum)
+{
+    UBYTE length = 0;
+    length = append_label(buffer, length, maximum, terrain_names[cell->terrain],
+                          terrain_lengths[cell->terrain]);
+    if (cell->road_class)
+        length = append_label(buffer, length, maximum,
+                              cell->road_class >= 3 ? "HWY" : "ROAD",
+                              cell->road_class >= 3 ? 3 : 4);
+    if (cell->river_class)
+        length = append_label(buffer, length, maximum,
+                              cell->river_class == 1 ? "STREAM" : "RIVER",
+                              cell->river_class == 1 ? 6 : 5);
+    if (cell->has_bridge)
+        length = append_label(buffer, length, maximum, "BRG", 3);
+    return length;
+}
+
 static void draw_text(struct RastPort *rp, WORD x, WORD y,
                       const char *text, UWORD length, UWORD color)
 {
@@ -413,11 +442,6 @@ static struct MapCell *map_cell_at(UBYTE x, UBYTE y)
     return &map_cells[(UWORD)y * map_width + x];
 }
 
-static UBYTE tile_at(UBYTE x, UBYTE y)
-{
-    return map_cell_at(x, y)->terrain;
-}
-
 static void draw_box(struct RastPort *rp, WORD left, WORD top, WORD right,
                      WORD bottom, UWORD color)
 {
@@ -429,10 +453,23 @@ static void draw_box(struct RastPort *rp, WORD left, WORD top, WORD right,
     Draw(rp, left, top);
 }
 
+static BOOL adjacent_feature(UBYTE map_x, UBYTE map_y, UBYTE feature)
+{
+    struct MapCell *cell;
+    if (map_x >= map_width || map_y >= map_height) return FALSE;
+    cell = map_cell_at(map_x, map_y);
+    if (feature == 0) return cell->road_class != 0;
+    return cell->river_class != 0 || cell->terrain == TILE_WATER;
+}
+
 static void draw_terrain(struct RastPort *rp, const struct MapCell *cell,
-                         WORD left, WORD top)
+                         UBYTE map_x, UBYTE map_y, WORD left, WORD top)
 {
     UWORD fill;
+    BOOL north;
+    BOOL south;
+    BOOL west;
+    BOOL east;
     if (cell->elevation < 300) fill = COLOR_CLEAR;
     else if (cell->elevation < 400) fill = COLOR_CLEAR_ALT;
     else if (cell->elevation < 500) fill = COLOR_HIGH_GROUND;
@@ -450,13 +487,34 @@ static void draw_terrain(struct RastPort *rp, const struct MapCell *cell,
 
     if (cell->road_class) {
         SetAPen(rp, COLOR_ROAD);
-        Move(rp, left + 1, top + 8);
-        Draw(rp, left + 14, top + 8);
+        north = map_y > 0 && adjacent_feature(map_x, map_y - 1, 0);
+        south = map_y + 1 < map_height && adjacent_feature(map_x, map_y + 1, 0);
+        west = map_x > 0 && adjacent_feature(map_x - 1, map_y, 0);
+        east = map_x + 1 < map_width && adjacent_feature(map_x + 1, map_y, 0);
+        if (north) { Move(rp, left + 8, top); Draw(rp, left + 8, top + 8); }
+        if (south) { Move(rp, left + 8, top + 8); Draw(rp, left + 8, top + 15); }
+        if (west) { Move(rp, left, top + 8); Draw(rp, left + 8, top + 8); }
+        if (east) { Move(rp, left + 8, top + 8); Draw(rp, left + 15, top + 8); }
+        if (!north && !south && !west && !east) {
+            Move(rp, left + 4, top + 8);
+            Draw(rp, left + 11, top + 8);
+        }
+        if (cell->road_class >= 2) RectFill(rp, left + 7, top + 7, left + 9, top + 9);
     }
     if (cell->river_class) {
         SetAPen(rp, COLOR_WATER);
-        Move(rp, left + 8, top + 1);
-        Draw(rp, left + 8, top + 14);
+        north = map_y > 0 && adjacent_feature(map_x, map_y - 1, 1);
+        south = map_y + 1 < map_height && adjacent_feature(map_x, map_y + 1, 1);
+        west = map_x > 0 && adjacent_feature(map_x - 1, map_y, 1);
+        east = map_x + 1 < map_width && adjacent_feature(map_x + 1, map_y, 1);
+        if (north) { Move(rp, left + 7, top); Draw(rp, left + 8, top + 8); }
+        if (south) { Move(rp, left + 8, top + 8); Draw(rp, left + 9, top + 15); }
+        if (west) { Move(rp, left, top + 7); Draw(rp, left + 8, top + 8); }
+        if (east) { Move(rp, left + 8, top + 8); Draw(rp, left + 15, top + 9); }
+        if (!north && !south && !west && !east) {
+            Move(rp, left + 7, top + 3);
+            Draw(rp, left + 8, top + 12);
+        }
     }
     if (cell->terrain == TILE_ROUGH) {
         SetAPen(rp, COLOR_TEXT);
@@ -465,8 +523,9 @@ static void draw_terrain(struct RastPort *rp, const struct MapCell *cell,
         Draw(rp, left + 12, top + 11);
     } else if (cell->terrain == TILE_WOODS) {
         SetAPen(rp, COLOR_CLEAR_ALT);
-        RectFill(rp, left + 4, top + 3, left + 6, top + 7);
-        RectFill(rp, left + 9, top + 6, left + 11, top + 10);
+        RectFill(rp, left + 3, top + 3, left + 6, top + 6);
+        RectFill(rp, left + 9, top + 2, left + 12, top + 5);
+        RectFill(rp, left + 6, top + 9, left + 9, top + 12);
     } else if (cell->terrain == TILE_WATER) {
         SetAPen(rp, COLOR_WHITE);
         Move(rp, left + 2, top + 6);
@@ -475,9 +534,16 @@ static void draw_terrain(struct RastPort *rp, const struct MapCell *cell,
         Draw(rp, left + 13, top + 10);
     } else if (cell->terrain == TILE_URBAN || cell->settlement_level) {
         SetAPen(rp, COLOR_BLACK);
-        RectFill(rp, left + 4, top + 4, left + 11, top + 12);
-        SetAPen(rp, COLOR_TEXT);
-        RectFill(rp, left + 7, top + 8, left + 8, top + 12);
+        RectFill(rp, left + 3, top + 3, left + 7, top + 7);
+        RectFill(rp, left + 9, top + 5, left + 12, top + 11);
+        RectFill(rp, left + 4, top + 10, left + 7, top + 13);
+    }
+    if (cell->has_bridge) {
+        SetAPen(rp, COLOR_WHITE);
+        RectFill(rp, left + 5, top + 6, left + 11, top + 9);
+        SetAPen(rp, COLOR_BLACK);
+        Move(rp, left + 5, top + 7);
+        Draw(rp, left + 11, top + 7);
     }
 }
 
@@ -505,7 +571,7 @@ static void draw_cell(struct RastPort *rp, UBYTE map_x, UBYTE map_y)
         map_y < camera_y || map_y >= camera_y + VIEW_HEIGHT) return;
     left = MAP_LEFT + ((WORD)(map_x - camera_x) << 4);
     top = MAP_TOP + ((WORD)(map_y - camera_y) << 4);
-    draw_terrain(rp, map_cell_at(map_x, map_y), left, top);
+    draw_terrain(rp, map_cell_at(map_x, map_y), map_x, map_y, left, top);
     unit = unit_at(map_x, map_y);
     if (unit >= 0) draw_unit(rp, unit, left, top);
 }
@@ -563,8 +629,8 @@ static const char *morale_name(UBYTE morale, UBYTE *length)
 static void draw_panel(struct RastPort *rp)
 {
     char number[3];
+    char terrain[24];
     UBYTE length;
-    UBYTE tile = tile_at(cursor_x, cursor_y);
     struct MapCell *cursor_cell = map_cell_at(cursor_x, cursor_y);
     clear_panel(rp);
     draw_text(rp, 384, 58, "TACTICAL DISPLAY", 16, COLOR_HIGHLIGHT);
@@ -576,7 +642,6 @@ static void draw_panel(struct RastPort *rp)
         struct Formation *parent = formation && formation->parent_id != 255 ?
                                    formation_by_id(formation->parent_id) : 0;
         const char *morale;
-        tile = tile_at(unit->x, unit->y);
         draw_text(rp, 384, 76, "SELECTED UNIT", 13, COLOR_HIGHLIGHT);
         draw_text(rp, 520, 76, side_names[type->faction],
                   side_lengths[type->faction], COLOR_HIGHLIGHT);
@@ -599,12 +664,14 @@ static void draw_panel(struct RastPort *rp)
                                number);
         draw_text(rp, 536, 222, "ELEV:", 5, COLOR_TEXT);
         draw_text(rp, 584, 222, number, length, COLOR_WHITE);
-        draw_value(rp, 238, "TERRAIN:", 8, terrain_names[tile],
-                   terrain_lengths[tile]);
+        draw_text(rp, 384, 238, "TERRAIN:", 8, COLOR_TEXT);
+        length = format_terrain(map_cell_at(unit->x, unit->y), terrain, 22);
+        draw_text(rp, 464, 238, terrain, length, COLOR_WHITE);
     } else {
         draw_text(rp, 384, 86, "NO UNIT SELECTED", 16, COLOR_TEXT);
-        draw_value(rp, 110, "TERRAIN:", 8, terrain_names[tile],
-                   terrain_lengths[tile]);
+        draw_text(rp, 384, 110, "TERRAIN:", 8, COLOR_TEXT);
+        length = format_terrain(cursor_cell, terrain, 24);
+        draw_text(rp, 448, 110, terrain, length, COLOR_WHITE);
         length = format_number((UWORD)cursor_cell->elevation, number);
         draw_value(rp, 126, "ELEVATION:", 10, number, length);
         length = format_number(cursor_x, number);
@@ -617,19 +684,19 @@ static void draw_panel(struct RastPort *rp)
     }
 
     if (selected_unit < 0)
-        draw_text(rp, 384, 246, "A3.2 MAP VIEWER", 15, COLOR_HIGHLIGHT);
+        draw_text(rp, 384, 246, "A3.3 TERRAIN PASS", 17, COLOR_HIGHLIGHT);
 }
 
 static void update_cursor_details(struct RastPort *rp)
 {
     char number[3];
+    char terrain[24];
     UBYTE length;
-    UBYTE tile = tile_at(cursor_x, cursor_y);
     struct MapCell *cell = map_cell_at(cursor_x, cursor_y);
     SetAPen(rp, COLOR_BACKGROUND);
-    RectFill(rp, 488, 98, 624, 160);
-    draw_text(rp, 488, 110, terrain_names[tile], terrain_lengths[tile],
-              COLOR_WHITE);
+    RectFill(rp, 448, 98, 639, 160);
+    length = format_terrain(cell, terrain, 24);
+    draw_text(rp, 448, 110, terrain, length, COLOR_WHITE);
     length = format_number((UWORD)cell->elevation, number);
     draw_text(rp, 488, 126, number, length, COLOR_WHITE);
     length = format_number(cursor_x, number);
@@ -687,7 +754,7 @@ static void draw_scene(struct RastPort *rp)
 {
     SetRast(rp, COLOR_BACKGROUND);
     draw_text(rp, 24, 22, "BATTALION: FULDA", 16, COLOR_HIGHLIGHT);
-    draw_text(rp, 24, 37, "POINT ALPHA MAP - A3.2", 22, COLOR_TEXT);
+    draw_text(rp, 24, 37, "POINT ALPHA MAP - A3.3", 22, COLOR_TEXT);
     draw_map(rp);
     draw_panel(rp);
 }
@@ -846,7 +913,7 @@ static void data_error_loop(void)
     draw_text(rp, 24, 30, "BATTALION: FULDA", 16, COLOR_HIGHLIGHT);
     draw_text(rp, 24, 62, "DATA LOAD FAILED", 16, COLOR_WARSAW);
     draw_clipped(rp, 24, 86, load_error, 60, COLOR_WHITE);
-    draw_text(rp, 24, 118, "CHECK THE A3.2 DATA FILES", 25, COLOR_TEXT);
+    draw_text(rp, 24, 118, "CHECK THE A3.3 DATA FILES", 25, COLOR_TEXT);
     draw_text(rp, 24, 150, "PRESS A KEY OR MOUSE BUTTON", 27, COLOR_TEXT);
     while (waiting) {
         struct IntuiMessage *message;

@@ -46,7 +46,22 @@ class DatabaseTests(unittest.TestCase):
             """).fetchone()
         finally:
             connection.close()
-        self.assertEqual(tuple(terrain), (238, 691, 1600, 1))
+        self.assertEqual(tuple(terrain), (238, 691, 1600, 2))
+
+        connection = manage_database.connect(self.database)
+        try:
+            features = connection.execute("""
+                SELECT
+                    SUM(CASE WHEN terrain_id = 1 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN terrain_id = 5 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN road_class > 0 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN river_class > 0 THEN 1 ELSE 0 END),
+                    SUM(has_bridge)
+                FROM map_cell WHERE map_id = 1
+            """).fetchone()
+        finally:
+            connection.close()
+        self.assertTrue(all(value > 0 for value in features))
 
     def test_compact_binary_headers_and_sizes(self) -> None:
         output = self.root / "generated"
@@ -112,7 +127,7 @@ class DatabaseTests(unittest.TestCase):
             "formations.csv": 5,
             "scenario_units.csv": 11,
             "maps.csv": 2,
-            "map_sources.csv": 1,
+            "map_sources.csv": 2,
             "terrain_types.csv": 6,
             "map_cells.csv": 1600,
         }
