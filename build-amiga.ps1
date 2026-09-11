@@ -68,9 +68,18 @@ if ($Test) {
     }
 }
 
-Copy-Item -LiteralPath (Join-Path $generatedDirectory 'map.bin') -Destination $diskDataDirectory -Force
-Copy-Item -LiteralPath (Join-Path $generatedDirectory 'units.bin') -Destination $diskDataDirectory -Force
-Copy-Item -LiteralPath (Join-Path $generatedDirectory 'scenario.bin') -Destination $diskDataDirectory -Force
+$diskDataFiles = @(
+    'map.bin',
+    'units.bin',
+    'scenario.bin',
+    'unit_types.bin',
+    'formations.bin',
+    'a2_scenario.bin'
+)
+foreach ($dataFile in $diskDataFiles) {
+    Copy-Item -LiteralPath (Join-Path $generatedDirectory $dataFile) `
+        -Destination $diskDataDirectory -Force
+}
 
 $compilerArguments = @(
     '-m68020', '-msoft-float', '-O2', '-g', '-nostdlib', '-ffreestanding',

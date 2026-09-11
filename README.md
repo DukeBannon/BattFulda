@@ -38,6 +38,23 @@ provides a real Fulda map, NATO and Warsaw Pact units, vertical map panning,
 mouse/WASD navigation, unit selection, and a tactical information panel. See
 `docs\A1.md` for the acceptance test.
 
+## A2.1 relational data foundation
+
+SQLite is the authoritative development store for unit types, formation
+hierarchies, scenarios, and scenario-unit state. Python validates the database,
+exports readable CSV snapshots, and compiles compact Amiga binary files. The
+Amiga runtime does not contain or depend on SQLite.
+
+```powershell
+cd C:\Repositories\Games\BattFulda
+python .\tools\manage_database.py validate
+python .\tools\manage_database.py export
+python .\tools\manage_database.py compile
+```
+
+The normal Amiga build performs database validation and compilation through
+`tools\compile_data.py`. See `docs\A2.1.md` for the schema and binary formats.
+
 ## Preserved C64 D1 prototype
 
 The earlier C64 proof of concept remains buildable for reference. It uses cc65,

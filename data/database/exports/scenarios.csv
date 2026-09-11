@@ -1,0 +1,2 @@
+scenario_id,scenario_key,display_name,map_key,scenario_year,turn_minutes,cursor_x,cursor_y,notes
+0,a2_command_post,Fulda Command Post,fulda_gap,1985,15,9,7,A2.1 database and order-of-battle demonstration.

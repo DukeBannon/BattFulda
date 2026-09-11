@@ -11,3 +11,8 @@ Thumbs.db
 *.workspace
 __pycache__/
 *.py[cod]
+
+# SQLite transient files created by graphical editors
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal

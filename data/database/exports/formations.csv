@@ -1,0 +1,6 @@
+formation_id,scenario_key,formation_key,display_name,parent_formation,faction,country,formation_kind,command_rating,base_morale,sort_order
+0,a2_command_post,nato_1_11_acr,"1st Squadron, 11th ACR",,NATO,USA,squadron,9,82,10
+1,a2_command_post,nato_team_alpha,Team Alpha,nato_1_11_acr,NATO,USA,company_team,8,78,20
+2,a2_command_post,su_tank_battalion,1st Tank Battalion,,Warsaw Pact,USSR,battalion,8,76,30
+3,a2_command_post,su_1st_tank_company,1st Tank Company,su_tank_battalion,Warsaw Pact,USSR,company,7,72,40
+4,a2_command_post,su_forward_detachment,Forward Detachment,su_tank_battalion,Warsaw Pact,USSR,company_team,8,75,50

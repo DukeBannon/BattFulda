@@ -1,0 +1,12 @@
+scenario_key,scenario_unit_id,unit_key,unit_name,formation_name,parent_formation,type_key,unit_type,faction,country,x,y,strength,morale,suppression,readiness
+a2_command_post,0,team_alpha_hq,Team Alpha Headquarters,Team Alpha,"1st Squadron, 11th ACR",us_hq_team_m577,US mechanized headquarters,NATO,USA,3,12,10,82,0,92
+a2_command_post,1,team_alpha_cav_1,1st Cavalry Platoon,Team Alpha,"1st Squadron, 11th ACR",us_cavalry_platoon_m3,US armored cavalry platoon,NATO,USA,5,10,10,80,0,90
+a2_command_post,2,team_alpha_cav_2,2nd Cavalry Platoon,Team Alpha,"1st Squadron, 11th ACR",us_cavalry_platoon_m3,US armored cavalry platoon,NATO,USA,6,11,9,76,1,86
+a2_command_post,3,team_alpha_tank,Tank Platoon,Team Alpha,"1st Squadron, 11th ACR",us_tank_platoon_m1,US M1 tank platoon,NATO,USA,5,12,10,84,0,94
+a2_command_post,4,team_alpha_atgm,TOW Team,Team Alpha,"1st Squadron, 11th ACR",us_atgm_team_tow,US TOW anti-tank team,NATO,USA,4,11,10,78,0,88
+a2_command_post,5,su_tank_company_hq,Tank Company Headquarters,1st Tank Company,1st Tank Battalion,su_hq_team_bmp1k,Soviet motor-rifle headquarters,Warsaw Pact,USSR,16,3,10,74,0,88
+a2_command_post,6,su_tank_platoon_1,1st Tank Platoon,1st Tank Company,1st Tank Battalion,su_tank_platoon_t64b,Soviet T-64B tank platoon,Warsaw Pact,USSR,15,4,10,74,0,90
+a2_command_post,7,su_tank_platoon_2,2nd Tank Platoon,1st Tank Company,1st Tank Battalion,su_tank_platoon_t64b,Soviet T-64B tank platoon,Warsaw Pact,USSR,16,4,10,72,0,88
+a2_command_post,8,su_tank_platoon_3,3rd Tank Platoon,1st Tank Company,1st Tank Battalion,su_tank_platoon_t64b,Soviet T-64B tank platoon,Warsaw Pact,USSR,17,4,9,68,1,82
+a2_command_post,9,su_attached_motor_rifle,Attached Motor-Rifle Platoon,Forward Detachment,1st Tank Battalion,su_motor_rifle_platoon_bmp2,Soviet BMP-2 motor-rifle platoon,Warsaw Pact,USSR,15,5,10,72,0,86
+a2_command_post,10,su_attached_atgm,Attached ATGM Team,Forward Detachment,1st Tank Battalion,su_atgm_team_at4_at5,Soviet AT-4/AT-5 anti-tank team,Warsaw Pact,USSR,16,5,10,70,0,84

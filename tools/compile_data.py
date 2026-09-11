@@ -1,10 +1,12 @@
-"""Compile editable Battalion: Fulda JSON fixtures into compact D1 assets."""
+"""Compile Battalion: Fulda source data into compact Amiga assets."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 import sys
+
+import manage_database
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +94,10 @@ def main() -> int:
         outputs = {"map.bin": map_data, "units.bin": unit_data, "scenario.bin": scenario_data}
         for name, contents in outputs.items():
             (OUTPUT / name).write_bytes(contents)
+            print(f"Generated {name}: {len(contents)} bytes")
+        manage_database.export_database()
+        database_outputs = manage_database.compile_database_assets()
+        for name, contents in database_outputs.items():
             print(f"Generated {name}: {len(contents)} bytes")
     except ValueError as error:
         print(f"Data error: {error}", file=sys.stderr)
