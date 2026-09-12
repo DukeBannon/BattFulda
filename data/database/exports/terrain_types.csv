@@ -5,3 +5,4 @@ terrain_id,terrain_key,display_name,cover_rating,concealment_rating
 3,marsh,Marsh,1,3
 4,water,Water,0,0
 5,urban,Urban,7,7
+6,cultivated,Cultivated,1,2

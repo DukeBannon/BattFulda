@@ -81,6 +81,8 @@ CREATE TABLE map (
     crs TEXT NOT NULL,
     origin_easting_m INTEGER,
     origin_northing_m INTEGER,
+    extent_width_m INTEGER CHECK (extent_width_m IS NULL OR extent_width_m > 0),
+    extent_height_m INTEGER CHECK (extent_height_m IS NULL OR extent_height_m > 0),
     geographic_status TEXT NOT NULL CHECK (
         geographic_status IN ('abstract', 'elevation_draft', 'feature_draft', 'reviewed')
     ),
@@ -125,6 +127,43 @@ CREATE TABLE map_cell (
     ),
     notes TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (map_id, x, y)
+);
+
+CREATE TABLE map_edge (
+    map_id INTEGER NOT NULL REFERENCES map(map_id) ON DELETE CASCADE,
+    x INTEGER NOT NULL CHECK (x BETWEEN 0 AND 254),
+    y INTEGER NOT NULL CHECK (y BETWEEN 0 AND 254),
+    direction INTEGER NOT NULL CHECK (direction IN (1, 2, 4, 8, 16, 32)),
+    neighbor_x INTEGER NOT NULL CHECK (neighbor_x BETWEEN 0 AND 254),
+    neighbor_y INTEGER NOT NULL CHECK (neighbor_y BETWEEN 0 AND 254),
+    road_class INTEGER NOT NULL DEFAULT 0 CHECK (road_class BETWEEN 0 AND 3),
+    river_class INTEGER NOT NULL DEFAULT 0 CHECK (river_class BETWEEN 0 AND 3),
+    crossing_type TEXT NOT NULL DEFAULT 'none' CHECK (
+        crossing_type IN ('none', 'bridge', 'ford')
+    ),
+    source_status TEXT NOT NULL CHECK (source_status IN ('draft', 'reviewed')),
+    PRIMARY KEY (map_id, x, y, direction),
+    UNIQUE (map_id, x, y, neighbor_x, neighbor_y)
+);
+
+CREATE TABLE map_feature (
+    map_id INTEGER NOT NULL REFERENCES map(map_id) ON DELETE CASCADE,
+    feature_id INTEGER NOT NULL,
+    feature_type TEXT NOT NULL CHECK (feature_type IN ('road', 'river', 'bridge')),
+    feature_class INTEGER NOT NULL CHECK (feature_class BETWEEN 1 AND 3),
+    source_status TEXT NOT NULL CHECK (source_status IN ('draft', 'reviewed')),
+    PRIMARY KEY (map_id, feature_id)
+);
+
+CREATE TABLE map_feature_vertex (
+    map_id INTEGER NOT NULL,
+    feature_id INTEGER NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 0),
+    easting_m REAL NOT NULL,
+    northing_m REAL NOT NULL,
+    PRIMARY KEY (map_id, feature_id, sequence),
+    FOREIGN KEY (map_id, feature_id)
+        REFERENCES map_feature(map_id, feature_id) ON DELETE CASCADE
 );
 
 CREATE TABLE scenario (

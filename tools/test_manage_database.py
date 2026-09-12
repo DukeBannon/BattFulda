@@ -25,7 +25,9 @@ class DatabaseTests(unittest.TestCase):
             "formations": 5,
             "scenario_units": 11,
             "maps": 2,
-            "map_cells": 1600,
+            "map_cells": 7360,
+            "map_edges": 2411,
+            "map_features": 459,
         })
         connection = manage_database.connect(self.database)
         try:
@@ -57,7 +59,7 @@ class DatabaseTests(unittest.TestCase):
             """).fetchone()
         finally:
             connection.close()
-        self.assertEqual(tuple(terrain), (238, 691, 1600, 2))
+        self.assertEqual(tuple(terrain), (232, 713, 7360, 1))
 
         connection = manage_database.connect(self.database)
         try:
@@ -65,6 +67,7 @@ class DatabaseTests(unittest.TestCase):
                 SELECT
                     SUM(CASE WHEN terrain_id = 1 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN terrain_id = 5 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN terrain_id = 6 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN road_class > 0 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN road_links > 0 THEN 1 ELSE 0 END),
                     SUM(CASE WHEN river_class > 0 THEN 1 ELSE 0 END),
@@ -75,6 +78,46 @@ class DatabaseTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertTrue(all(value > 0 for value in features))
+
+    def test_w1_hex_topology_and_feature_paths(self) -> None:
+        connection = manage_database.connect(self.database)
+        try:
+            map_row = connection.execute("""
+                SELECT width, height, cell_size_m, extent_width_m, extent_height_m
+                FROM map WHERE map_key = 'point_alpha_corridor'
+            """).fetchone()
+            cultivated_cells = connection.execute("""
+                SELECT COUNT(*) FROM map_cell
+                WHERE map_id = 1 AND terrain_id = 6
+            """).fetchone()[0]
+            road_classes = {
+                row[0] for row in connection.execute(
+                    "SELECT DISTINCT road_class FROM map_edge WHERE road_class > 0"
+                )
+            }
+            river_classes = {
+                row[0] for row in connection.execute(
+                    "SELECT DISTINCT river_class FROM map_edge WHERE river_class > 0"
+                )
+            }
+            bridge_paths = connection.execute("""
+                SELECT COUNT(*) FROM map_feature WHERE feature_type = 'bridge'
+            """).fetchone()[0]
+            bridge_crossings = connection.execute("""
+                SELECT COUNT(*) FROM map_edge
+                WHERE crossing_type = 'bridge'
+                  AND road_class > 0
+                  AND river_class > 0
+            """).fetchone()[0]
+        finally:
+            connection.close()
+
+        self.assertEqual(tuple(map_row), (92, 80, 250, 20000, 20000))
+        self.assertGreater(cultivated_cells, 0)
+        self.assertTrue({1, 2}.issubset(road_classes))
+        self.assertTrue({1, 2, 3}.issubset(river_classes))
+        self.assertEqual(bridge_paths, 72)
+        self.assertEqual(bridge_crossings, 61)
 
     def test_map_feature_links_must_be_reciprocal(self) -> None:
         connection = manage_database.connect(self.database)
@@ -106,14 +149,14 @@ class DatabaseTests(unittest.TestCase):
         scenario_header = struct.unpack(">4sBBBBBBBBBBH", assets["a2_scenario.bin"][:16])
         self.assertEqual(
             scenario_header,
-            (b"BFSC", 2, 0, 40, 40, 15, 8, 24, 5, 11, 11, 137),
+            (b"BFSC", 2, 0, 92, 80, 15, 19, 48, 5, 11, 11, 137),
         )
         self.assertGreater(len(assets["a2_scenario.bin"]), 16 + 11 * 11)
         self.assertIn(b"Team Alpha Headquarters\0", assets["a2_scenario.bin"])
 
         map_header = struct.unpack(">4sBBBBBHII", assets["point_alpha_map.bin"][:19])
-        self.assertEqual(map_header, (b"BFMP", 1, 1, 40, 40, 7, 500, 554000, 5610000))
-        self.assertEqual(len(assets["point_alpha_map.bin"]), 19 + 40 * 40 * 7)
+        self.assertEqual(map_header, (b"BFMP", 1, 1, 92, 80, 7, 250, 554000, 5610000))
+        self.assertEqual(len(assets["point_alpha_map.bin"]), 19 + 92 * 80 * 7)
 
     def test_runtime_ids_may_repeat_in_different_scenarios(self) -> None:
         connection = manage_database.connect(self.database)
@@ -158,8 +201,10 @@ class DatabaseTests(unittest.TestCase):
             "scenario_units.csv": 11,
             "maps.csv": 2,
             "map_sources.csv": 2,
-            "terrain_types.csv": 6,
-            "map_cells.csv": 1600,
+            "terrain_types.csv": 7,
+            "map_cells.csv": 7360,
+            "map_edges.csv": 2411,
+            "map_features.csv": 7443,
         }
         for name, expected in expected_rows.items():
             with (output / name).open(encoding="utf-8", newline="") as source:

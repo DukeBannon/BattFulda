@@ -7,6 +7,7 @@ $service = 'https://sgx.geodatenzentrum.de/wfs_dlm250'
 $bounds = '554000,5610000,574000,5630000,EPSG:25832'
 $layers = [ordered]@{
     roads = '42003_l'
+    cultivated = '43001_f'
     woods = '43002_f'
     settlements = '41010_f'
     moor = '43005_f'

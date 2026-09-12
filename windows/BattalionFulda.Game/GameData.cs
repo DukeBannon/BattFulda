@@ -32,32 +32,65 @@ internal sealed record ScenarioUnit(
     int Readiness,
     bool Amphibious);
 
+internal sealed record MapVertex(double Easting, double Northing);
+
+internal sealed record MapFeaturePath(
+    int Id,
+    string Type,
+    int FeatureClass,
+    IReadOnlyList<MapVertex> Vertices);
+
 internal sealed class GameData
 {
-    public const int MapWidth = 40;
-    public const int MapHeight = 40;
-
+    public required int MapWidth { get; init; }
+    public required int MapHeight { get; init; }
+    public required int CellSizeMeters { get; init; }
+    public required double OriginEasting { get; init; }
+    public required double OriginNorthing { get; init; }
+    public required double ExtentWidthMeters { get; init; }
+    public required double ExtentHeightMeters { get; init; }
     public required MapCell[,] Cells { get; init; }
     public required IReadOnlyList<ScenarioUnit> Units { get; init; }
+    public required IReadOnlyList<MapFeaturePath> Features { get; init; }
 
     public static GameData Load()
     {
         string root = FindRepositoryRoot();
-        MapCell[,] cells = LoadMap(Path.Combine(root, "data", "maps", "point_alpha_cells.csv"));
+        string mapsPath = Path.Combine(root, "data", "database", "exports", "maps.csv");
+        string[] map = ReadCsv(mapsPath).Skip(1).First(row =>
+            string.Equals(row[1], "point_alpha_corridor", StringComparison.OrdinalIgnoreCase));
+        int width = ParseInt(map[3]);
+        int height = ParseInt(map[4]);
+        MapCell[,] cells = LoadMap(
+            Path.Combine(root, "data", "maps", "point_alpha_cells.csv"), width, height);
         IReadOnlyList<ScenarioUnit> units = LoadUnits(Path.Combine(
             root, "data", "database", "exports", "scenario_units.csv"));
+        IReadOnlyList<MapFeaturePath> features = LoadFeatures(Path.Combine(
+            root, "data", "maps", "point_alpha_features.csv"));
 
-        return new GameData { Cells = cells, Units = units };
+        return new GameData
+        {
+            MapWidth = width,
+            MapHeight = height,
+            CellSizeMeters = ParseInt(map[5]),
+            OriginEasting = ParseDouble(map[7]),
+            OriginNorthing = ParseDouble(map[8]),
+            ExtentWidthMeters = ParseDouble(map[9]),
+            ExtentHeightMeters = ParseDouble(map[10]),
+            Cells = cells,
+            Units = units,
+            Features = features
+        };
     }
 
-    private static MapCell[,] LoadMap(string path)
+    private static MapCell[,] LoadMap(string path, int width, int height)
     {
-        var cells = new MapCell[MapWidth, MapHeight];
+        var cells = new MapCell[width, height];
         foreach (string[] row in ReadCsv(path).Skip(1))
         {
             int x = ParseInt(row[1]);
             int y = ParseInt(row[2]);
-            if (x is < 0 or >= MapWidth || y is < 0 or >= MapHeight)
+            if (x is < 0 || x >= width || y is < 0 || y >= height)
                 continue;
 
             cells[x, y] = new MapCell(
@@ -66,11 +99,30 @@ internal sealed class GameData
                 ParseInt(row[10]) != 0);
         }
 
-        for (int y = 0; y < MapHeight; y++)
-        for (int x = 0; x < MapWidth; x++)
+        for (int y = 0; y < height; y++)
+        for (int x = 0; x < width; x++)
             cells[x, y] ??= new MapCell(x, y, 300, "clear", 0, 0, 0, 0, 0, false);
 
         return cells;
+    }
+
+    private static IReadOnlyList<MapFeaturePath> LoadFeatures(string path)
+    {
+        var paths = new Dictionary<int, (string Type, int Class, List<MapVertex> Vertices)>();
+        foreach (string[] row in ReadCsv(path).Skip(1))
+        {
+            int id = ParseInt(row[1]);
+            if (!paths.TryGetValue(id, out var pathData))
+            {
+                pathData = (row[2], ParseInt(row[3]), []);
+                paths.Add(id, pathData);
+            }
+            pathData.Vertices.Add(new MapVertex(ParseDouble(row[5]), ParseDouble(row[6])));
+        }
+        return paths.OrderBy(pair => pair.Key)
+            .Select(pair => new MapFeaturePath(
+                pair.Key, pair.Value.Type, pair.Value.Class, pair.Value.Vertices))
+            .ToArray();
     }
 
     private static IReadOnlyList<ScenarioUnit> LoadUnits(string path)
@@ -131,6 +183,9 @@ internal sealed class GameData
 
     private static int ParseInt(string value) =>
         int.Parse(value, NumberStyles.Integer, CultureInfo.InvariantCulture);
+
+    private static double ParseDouble(string value) =>
+        double.Parse(value, NumberStyles.Float, CultureInfo.InvariantCulture);
 
     private static string FindRepositoryRoot()
     {

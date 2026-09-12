@@ -1,5 +1,5 @@
 INSERT INTO schema_info(version, created_utc)
-VALUES (5, '2026-09-11T00:00:00Z');
+VALUES (6, '2026-09-12T00:00:00Z');
 
 INSERT INTO faction(faction_id, faction_key, display_name) VALUES
     (0, 'NATO', 'NATO'),
@@ -50,7 +50,8 @@ INSERT INTO terrain_type(
     (2, 'rough', 'Rough', 3, 2),
     (3, 'marsh', 'Marsh', 1, 3),
     (4, 'water', 'Water', 0, 0),
-    (5, 'urban', 'Urban', 7, 7);
+    (5, 'urban', 'Urban', 7, 7),
+    (6, 'cultivated', 'Cultivated', 1, 2);
 
 INSERT INTO formation_kind(formation_kind_id, formation_kind_key, display_name) VALUES
     (0, 'regiment', 'Regiment'),

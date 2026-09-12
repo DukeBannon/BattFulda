@@ -10,6 +10,8 @@ internal sealed class BattlefieldView : Control
     private const int InspectorWidth = 238;
     private const int MiniMapWidth = 220;
     private const int MiniMapHeight = 150;
+    private const int TerrainChunkPixels = 1024;
+    private const int TerrainChunkBleed = 4;
 
     private readonly GameData data;
     private readonly Font titleFont = new("Bahnschrift SemiCondensed", 18, FontStyle.Bold);
@@ -19,7 +21,7 @@ internal sealed class BattlefieldView : Control
     private readonly Font bodyBoldFont = new("Segoe UI Semibold", 10, FontStyle.Bold);
     private readonly Font counterFont = new("Arial", 9, FontStyle.Bold);
     private readonly Bitmap? terrainAtlas = LoadTerrainAtlas();
-    private Bitmap? terrainLayer;
+    private readonly Dictionary<(int X, int Y), Bitmap> terrainChunks = [];
     private float terrainLayerCellSize;
     private Bitmap? miniMapLayer;
     private readonly System.Windows.Forms.Timer edgeScrollTimer = new() { Interval = 16 };
@@ -27,7 +29,7 @@ internal sealed class BattlefieldView : Control
     private float cameraX = 4.5f;
     private float cameraY = 14.5f;
     private ScenarioUnit? selectedUnit;
-    private Point? selectedCell = new Point(10, 24);
+    private Point? selectedCell = new Point(19, 48);
     private Point dragStart;
     private float dragCameraX;
     private float dragCameraY;
@@ -73,10 +75,10 @@ internal sealed class BattlefieldView : Control
 
     private void MoveCursor(int dx, int dy)
     {
-        Point current = selectedCell ?? new Point(GameData.MapWidth / 2, GameData.MapHeight / 2);
+        Point current = selectedCell ?? new Point(data.MapWidth / 2, data.MapHeight / 2);
         selectedCell = new Point(
-            Math.Clamp(current.X + dx, 0, GameData.MapWidth - 1),
-            Math.Clamp(current.Y + dy, 0, GameData.MapHeight - 1));
+            Math.Clamp(current.X + dx, 0, data.MapWidth - 1),
+            Math.Clamp(current.Y + dy, 0, data.MapHeight - 1));
         EnsureCursorVisible();
         Invalidate();
     }
@@ -261,7 +263,15 @@ internal sealed class BattlefieldView : Control
         y += 23;
 
         var features = new List<string>(3);
-        if (cell.RoadClass > 0) features.Add("ROAD");
+        if (cell.RoadClass > 0)
+        {
+            features.Add(cell.RoadClass switch
+            {
+                3 => "PRIMARY ROAD",
+                2 => "SECONDARY ROAD",
+                _ => "LOCAL ROAD"
+            });
+        }
         if (cell.RiverClass > 0)
         {
             features.Add(cell.RiverClass switch
@@ -296,22 +306,13 @@ internal sealed class BattlefieldView : Control
     {
         using Region oldClip = g.Clip;
         g.SetClip(bounds);
-        EnsureTerrainLayer();
-        if (terrainLayer is not null)
-        {
-            InterpolationMode oldInterpolation = g.InterpolationMode;
-            g.InterpolationMode = InterpolationMode.Bilinear;
-            g.DrawImage(terrainLayer, bounds,
-                cameraX * HexColumnStep, cameraY * HexHeight,
-                bounds.Width, bounds.Height, GraphicsUnit.Pixel);
-            g.InterpolationMode = oldInterpolation;
-        }
+        DrawTerrainChunks(g, bounds);
 
         int firstX = Math.Max(0, (int)Math.Floor(cameraX) - 2);
         int firstY = Math.Max(0, (int)Math.Floor(cameraY) - 2);
-        int lastX = Math.Min(GameData.MapWidth - 1,
+        int lastX = Math.Min(data.MapWidth - 1,
             firstX + (int)Math.Ceiling(bounds.Width / HexColumnStep) + 4);
-        int lastY = Math.Min(GameData.MapHeight - 1,
+        int lastY = Math.Min(data.MapHeight - 1,
             firstY + (int)Math.Ceiling(bounds.Height / HexHeight) + 4);
 
         foreach (ScenarioUnit unit in data.Units)
@@ -337,24 +338,62 @@ internal sealed class BattlefieldView : Control
         g.Clip = oldClip;
     }
 
-    private void EnsureTerrainLayer()
+    private void DrawTerrainChunks(Graphics g, Rectangle bounds)
     {
-        if (terrainLayer is not null && Math.Abs(terrainLayerCellSize - cellSize) < 0.01f)
-            return;
+        if (Math.Abs(terrainLayerCellSize - cellSize) >= 0.01f)
+        {
+            foreach (Bitmap chunk in terrainChunks.Values) chunk.Dispose();
+            terrainChunks.Clear();
+            terrainLayerCellSize = cellSize;
+        }
 
-        terrainLayer?.Dispose();
-        int width = (int)Math.Ceiling((GameData.MapWidth - 1) * HexColumnStep + cellSize) + 2;
-        int height = (int)Math.Ceiling((GameData.MapHeight + 0.5f) * HexHeight) + 2;
-        terrainLayer = new Bitmap(width, height);
-        terrainLayerCellSize = cellSize;
+        float sourceX = cameraX * HexColumnStep;
+        float sourceY = cameraY * HexHeight;
+        int firstChunkX = Math.Max(0, (int)Math.Floor(sourceX / TerrainChunkPixels));
+        int firstChunkY = Math.Max(0, (int)Math.Floor(sourceY / TerrainChunkPixels));
+        int lastChunkX = (int)Math.Floor((sourceX + bounds.Width) / TerrainChunkPixels);
+        int lastChunkY = (int)Math.Floor((sourceY + bounds.Height) / TerrainChunkPixels);
+        for (int chunkY = firstChunkY; chunkY <= lastChunkY; chunkY++)
+        for (int chunkX = firstChunkX; chunkX <= lastChunkX; chunkX++)
+        {
+            Bitmap chunk = GetTerrainChunk(chunkX, chunkY);
+            Rectangle chunkWorldBounds = TerrainChunkWorldBounds(chunkX, chunkY);
+            float destinationX = bounds.X + chunkWorldBounds.Left - sourceX;
+            float destinationY = bounds.Y + chunkWorldBounds.Top - sourceY;
+            g.DrawImageUnscaled(chunk, (int)Math.Floor(destinationX), (int)Math.Floor(destinationY));
+        }
+    }
 
-        using Graphics layer = Graphics.FromImage(terrainLayer);
+    private Bitmap GetTerrainChunk(int chunkX, int chunkY)
+    {
+        if (terrainChunks.TryGetValue((chunkX, chunkY), out Bitmap? existing))
+            return existing;
+
+        int worldWidth = (int)Math.Ceiling((data.MapWidth - 1) * HexColumnStep + cellSize) + 2;
+        int worldHeight = (int)Math.Ceiling((data.MapHeight + 0.5f) * HexHeight) + 2;
+        Rectangle chunkWorldBounds = TerrainChunkWorldBounds(chunkX, chunkY);
+        int left = chunkWorldBounds.Left;
+        int top = chunkWorldBounds.Top;
+        int width = chunkWorldBounds.Width;
+        int height = chunkWorldBounds.Height;
+        var chunk = new Bitmap(width, height);
+        terrainChunks.Add((chunkX, chunkY), chunk);
+
+        using Graphics layer = Graphics.FromImage(chunk);
         layer.SmoothingMode = SmoothingMode.AntiAlias;
         layer.InterpolationMode = InterpolationMode.HighQualityBilinear;
         layer.Clear(Color.FromArgb(67, 75, 50));
+        layer.TranslateTransform(-left, -top);
 
-        for (int y = 0; y < GameData.MapHeight; y++)
-        for (int x = 0; x < GameData.MapWidth; x++)
+        int firstX = Math.Max(0, (int)Math.Floor(left / HexColumnStep) - 2);
+        int lastX = Math.Min(data.MapWidth - 1,
+            (int)Math.Ceiling((left + width) / HexColumnStep) + 2);
+        int firstY = Math.Max(0, (int)Math.Floor(top / HexHeight) - 2);
+        int lastY = Math.Min(data.MapHeight - 1,
+            (int)Math.Ceiling((top + height) / HexHeight) + 2);
+
+        for (int y = firstY; y <= lastY; y++)
+        for (int x = firstX; x <= lastX; x++)
         {
             RectangleF cellBounds = WorldCellBounds(x, y);
             using GraphicsPath hex = HexPath(cellBounds);
@@ -364,17 +403,94 @@ internal sealed class BattlefieldView : Control
             layer.Restore(state);
         }
 
-        for (int y = 0; y < GameData.MapHeight; y++)
-        for (int x = 0; x < GameData.MapWidth; x++)
-            DrawLinearFeatures(layer, WorldCellBounds(x, y), data.Cells[x, y]);
+        DrawGeographicFeatures(layer, worldWidth, worldHeight);
 
         using var gridPen = new Pen(Color.FromArgb(70, 31, 42, 34), 1);
-        for (int y = 0; y < GameData.MapHeight; y++)
-        for (int x = 0; x < GameData.MapWidth; x++)
+        for (int y = firstY; y <= lastY; y++)
+        for (int x = firstX; x <= lastX; x++)
         {
             using GraphicsPath hex = HexPath(WorldCellBounds(x, y));
             layer.DrawPath(gridPen, hex);
         }
+        layer.ResetTransform();
+        return chunk;
+    }
+
+    private Rectangle TerrainChunkWorldBounds(int chunkX, int chunkY)
+    {
+        int worldWidth = (int)Math.Ceiling((data.MapWidth - 1) * HexColumnStep + cellSize) + 2;
+        int worldHeight = (int)Math.Ceiling((data.MapHeight + 0.5f) * HexHeight) + 2;
+        int logicalLeft = chunkX * TerrainChunkPixels;
+        int logicalTop = chunkY * TerrainChunkPixels;
+        int left = Math.Max(0, logicalLeft - TerrainChunkBleed);
+        int top = Math.Max(0, logicalTop - TerrainChunkBleed);
+        int right = Math.Min(worldWidth, logicalLeft + TerrainChunkPixels + TerrainChunkBleed);
+        int bottom = Math.Min(worldHeight, logicalTop + TerrainChunkPixels + TerrainChunkBleed);
+        return Rectangle.FromLTRB(left, top, Math.Max(left + 1, right), Math.Max(top + 1, bottom));
+    }
+
+    private void DrawGeographicFeatures(Graphics g, int worldWidth, int worldHeight)
+    {
+        foreach (string featureType in new[] { "road", "river", "bridge" })
+        {
+            foreach (MapFeaturePath feature in data.Features.Where(feature =>
+                         feature.Type.Equals(featureType, StringComparison.OrdinalIgnoreCase)))
+            {
+                PointF[] points = feature.Vertices.Select(vertex => new PointF(
+                    (float)((vertex.Easting - data.OriginEasting) /
+                            data.ExtentWidthMeters * worldWidth),
+                    (float)((data.OriginNorthing + data.ExtentHeightMeters - vertex.Northing) /
+                            data.ExtentHeightMeters * worldHeight))).ToArray();
+                if (points.Length < 2) continue;
+
+                if (featureType == "road")
+                {
+                    float scale = feature.FeatureClass switch { 3 => 0.14f, 2 => 0.11f, _ => 0.08f };
+                    using var edge = new Pen(Color.FromArgb(66, 55, 43), Math.Max(4, cellSize * scale));
+                    using var surface = new Pen(Color.FromArgb(187, 169, 132),
+                        Math.Max(2, cellSize * scale * 0.55f));
+                    edge.StartCap = edge.EndCap = LineCap.Round;
+                    surface.StartCap = surface.EndCap = LineCap.Round;
+                    g.DrawLines(edge, points);
+                    g.DrawLines(surface, points);
+                }
+                else if (featureType == "river")
+                {
+                    float bankScale = feature.FeatureClass switch { 1 => 0.055f, 2 => 0.12f, _ => 0.20f };
+                    float waterScale = feature.FeatureClass switch { 1 => 0.032f, 2 => 0.08f, _ => 0.15f };
+                    using var bank = new Pen(Color.FromArgb(54, 74, 64), Math.Max(2, cellSize * bankScale));
+                    using var water = new Pen(Color.FromArgb(48, 126, 174), Math.Max(1.5f, cellSize * waterScale));
+                    bank.StartCap = bank.EndCap = LineCap.Round;
+                    water.StartCap = water.EndCap = LineCap.Round;
+                    g.DrawLines(bank, points);
+                    g.DrawLines(water, points);
+                }
+                else
+                {
+                    float railScale = feature.FeatureClass switch
+                    {
+                        1 => 0.075f,
+                        2 => 0.09f,
+                        _ => 0.11f
+                    };
+                    float deckScale = feature.FeatureClass switch
+                    {
+                        1 => 0.042f,
+                        2 => 0.052f,
+                        _ => 0.064f
+                    };
+                    using var edge = new Pen(Color.FromArgb(35, 32, 29),
+                        Math.Max(3, cellSize * railScale));
+                    using var deck = new Pen(Color.FromArgb(224, 207, 169),
+                        Math.Max(2, cellSize * deckScale));
+                    edge.StartCap = edge.EndCap = LineCap.Square;
+                    deck.StartCap = deck.EndCap = LineCap.Square;
+                    g.DrawLines(edge, points);
+                    g.DrawLines(deck, points);
+                }
+            }
+        }
+
     }
 
     private void DrawTerrainCell(Graphics g, RectangleF b, MapCell cell)
@@ -400,6 +516,8 @@ internal sealed class BattlefieldView : Control
         if (terrainAtlas is not null && !cell.Terrain.Equals("water", StringComparison.OrdinalIgnoreCase))
         {
             DrawTerrainTexture(g, b, cell);
+            if (cell.Terrain.Equals("cultivated", StringComparison.OrdinalIgnoreCase))
+                DrawCultivatedField(g, b, cell);
             int elevationAlpha = Math.Clamp(Math.Abs(cell.Elevation - 380) / 7, 0, 22);
             Color elevationColor = cell.Elevation >= 380
                 ? Color.FromArgb(elevationAlpha, 238, 225, 174)
@@ -467,6 +585,13 @@ internal sealed class BattlefieldView : Control
         int panelWidth = terrainAtlas.Width / 3;
         int panelHeight = terrainAtlas.Height / 2;
         int padding = Math.Max(8, Math.Min(panelWidth, panelHeight) / 50);
+
+        if (cell.Terrain.Equals("cultivated", StringComparison.OrdinalIgnoreCase))
+        {
+            DrawCultivatedTexture(g, bounds, cell, column, row, panelWidth, panelHeight, padding);
+            return;
+        }
+
         int sourceWidth = Math.Min(260, panelWidth - padding * 2);
         int sourceHeight = Math.Min(225, panelHeight - padding * 2);
         int availableX = Math.Max(1, panelWidth - padding * 2 - sourceWidth);
@@ -478,6 +603,88 @@ internal sealed class BattlefieldView : Control
         int sourceY = row * panelHeight + padding + (int)((hash >> 12) % (uint)availableY);
         var source = new RectangleF(sourceX, sourceY, sourceWidth, sourceHeight);
         g.DrawImage(terrainAtlas, bounds, source, GraphicsUnit.Pixel);
+    }
+
+    private void DrawCultivatedTexture(
+        Graphics g, RectangleF bounds, MapCell cell, int column, int row,
+        int panelWidth, int panelHeight, int padding)
+    {
+        if (terrainAtlas is null) return;
+        const int districtColumns = 3;
+        const int districtRows = 2;
+        int firstColumn = cell.X / districtColumns * districtColumns;
+        int firstRow = cell.Y / districtRows * districtRows;
+
+        RectangleF districtBounds = RectangleF.Empty;
+        for (int y = firstRow; y < Math.Min(data.MapHeight, firstRow + districtRows); y++)
+        for (int x = firstColumn; x < Math.Min(data.MapWidth, firstColumn + districtColumns); x++)
+        {
+            RectangleF cellBounds = WorldCellBounds(x, y);
+            districtBounds = districtBounds.IsEmpty
+                ? cellBounds
+                : RectangleF.Union(districtBounds, cellBounds);
+        }
+
+        float contentLeft = column * panelWidth + padding;
+        float contentTop = row * panelHeight + padding;
+        float contentWidth = panelWidth - padding * 2;
+        float contentHeight = panelHeight - padding * 2;
+        var source = new RectangleF(
+            contentLeft + (bounds.Left - districtBounds.Left) / districtBounds.Width * contentWidth,
+            contentTop + (bounds.Top - districtBounds.Top) / districtBounds.Height * contentHeight,
+            bounds.Width / districtBounds.Width * contentWidth,
+            bounds.Height / districtBounds.Height * contentHeight);
+        g.DrawImage(terrainAtlas, bounds, source, GraphicsUnit.Pixel);
+    }
+
+    private void DrawCultivatedField(Graphics g, RectangleF bounds, MapCell cell)
+    {
+        const int districtColumns = 3;
+        const int districtRows = 2;
+        int districtX = cell.X / districtColumns;
+        int districtY = cell.Y / districtRows;
+        uint hash = unchecked((uint)(districtX * 73856093) ^
+                              (uint)(districtY * 19349663) ^ 0x9E3779B9u);
+
+        Color[] fieldTints =
+        [
+            Color.FromArgb(62, 175, 151, 76),
+            Color.FromArgb(55, 191, 166, 91),
+            Color.FromArgb(58, 142, 119, 61),
+            Color.FromArgb(52, 181, 139, 69)
+        ];
+        using (var tint = new SolidBrush(fieldTints[hash % (uint)fieldTints.Length]))
+            g.FillRectangle(tint, bounds);
+
+        float[] angles = [-24f, -12f, 0f, 14f, 27f];
+        float angle = angles[(hash >> 8) % (uint)angles.Length];
+        int firstColumn = districtX * districtColumns;
+        int firstRow = districtY * districtRows;
+        RectangleF districtStart = WorldCellBounds(firstColumn, firstRow);
+        RectangleF districtEnd = WorldCellBounds(
+            Math.Min(data.MapWidth - 1, firstColumn + districtColumns - 1),
+            Math.Min(data.MapHeight - 1, firstRow + districtRows - 1));
+        float centerX = (districtStart.Left + districtEnd.Right) / 2;
+        float centerY = (districtStart.Top + districtEnd.Bottom) / 2;
+        float reach = Math.Max(
+            districtEnd.Right - districtStart.Left,
+            districtEnd.Bottom - districtStart.Top) * 1.4f;
+        float spacing = Math.Max(5, cellSize * 0.075f);
+
+        GraphicsState state = g.Save();
+        g.TranslateTransform(centerX, centerY);
+        g.RotateTransform(angle);
+        using var furrow = new Pen(Color.FromArgb(68, 67, 79, 43),
+            Math.Max(1, cellSize * 0.012f));
+        using var highlight = new Pen(Color.FromArgb(38, 229, 211, 137),
+            Math.Max(1, cellSize * 0.008f));
+        for (float row = -reach; row <= reach; row += spacing)
+        {
+            g.DrawLine(furrow, -reach, row, reach, row);
+            g.DrawLine(highlight, -reach, row + Math.Max(1, spacing * 0.25f), reach,
+                row + Math.Max(1, spacing * 0.25f));
+        }
+        g.Restore(state);
     }
 
     private static Bitmap? LoadTerrainAtlas()
@@ -627,8 +834,8 @@ internal sealed class BattlefieldView : Control
         Rectangle inner = MiniMapInnerBounds(mapBounds);
         GraphicsState miniMapState = g.Save();
         g.SetClip(inner, CombineMode.Intersect);
-        float mapWorldWidth = (GameData.MapWidth - 1) * 0.75f + 1f;
-        float mapWorldHeight = GameData.MapHeight + 0.5f;
+        float mapWorldWidth = (data.MapWidth - 1) * 0.75f + 1f;
+        float mapWorldHeight = data.MapHeight + 0.5f;
         float sx = inner.Width / mapWorldWidth;
         float sy = inner.Height / mapWorldHeight;
         EnsureMiniMapLayer(inner.Size, sx, sy);
@@ -682,8 +889,8 @@ internal sealed class BattlefieldView : Control
         using var clear = new SolidBrush(Color.FromArgb(121, 133, 75));
         using var water = new SolidBrush(Color.FromArgb(49, 112, 151));
 
-        for (int y = 0; y < GameData.MapHeight; y++)
-        for (int x = 0; x < GameData.MapWidth; x++)
+        for (int y = 0; y < data.MapHeight; y++)
+        for (int x = 0; x < data.MapWidth; x++)
         {
             MapCell cell = data.Cells[x, y];
             Brush brush = cell.RiverClass > 0
@@ -777,8 +984,8 @@ internal sealed class BattlefieldView : Control
         Rectangle map = MapBounds();
         if (!map.Contains(point)) return;
         Point? hit = null;
-        for (int y = 0; y < GameData.MapHeight && hit is null; y++)
-        for (int x = 0; x < GameData.MapWidth; x++)
+        for (int y = 0; y < data.MapHeight && hit is null; y++)
+        for (int x = 0; x < data.MapWidth; x++)
         {
             RectangleF bounds = CellBounds(map, x, y);
             if (!bounds.Contains(point)) continue;
@@ -857,8 +1064,8 @@ internal sealed class BattlefieldView : Control
     private void CenterCameraFromMiniMap(Point point, Rectangle mapBounds)
     {
         Rectangle inner = MiniMapInnerBounds(mapBounds);
-        float mapWorldWidth = (GameData.MapWidth - 1) * 0.75f + 1f;
-        float mapWorldHeight = GameData.MapHeight + 0.5f;
+        float mapWorldWidth = (data.MapWidth - 1) * 0.75f + 1f;
+        float mapWorldHeight = data.MapHeight + 0.5f;
         float sx = inner.Width / mapWorldWidth;
         float sy = inner.Height / mapWorldHeight;
         float worldX = (Math.Clamp(point.X, inner.Left, inner.Right) - inner.Left) / sx;
@@ -877,9 +1084,9 @@ internal sealed class BattlefieldView : Control
         Rectangle map = MapBounds();
         float visibleColumns = Math.Max(1, map.Width / HexColumnStep);
         float visibleRows = Math.Max(1, map.Height / HexHeight);
-        float mapWidthInColumnSteps = GameData.MapWidth - 1 + cellSize / HexColumnStep;
+        float mapWidthInColumnSteps = data.MapWidth - 1 + cellSize / HexColumnStep;
         cameraX = Math.Clamp(cameraX, 0, Math.Max(0, mapWidthInColumnSteps - visibleColumns));
-        cameraY = Math.Clamp(cameraY, 0, Math.Max(0, GameData.MapHeight + 0.5f - visibleRows));
+        cameraY = Math.Clamp(cameraY, 0, Math.Max(0, data.MapHeight + 0.5f - visibleRows));
     }
 
     private static string MoraleText(int morale) => morale switch
@@ -902,7 +1109,8 @@ internal sealed class BattlefieldView : Control
             bodyBoldFont.Dispose();
             counterFont.Dispose();
             terrainAtlas?.Dispose();
-            terrainLayer?.Dispose();
+            foreach (Bitmap chunk in terrainChunks.Values) chunk.Dispose();
+            terrainChunks.Clear();
             miniMapLayer?.Dispose();
         }
         base.Dispose(disposing);

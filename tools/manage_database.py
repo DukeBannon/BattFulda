@@ -21,9 +21,11 @@ SCENARIO_SEED_PATH = DATABASE_DIRECTORY / "scenario_seed.sql"
 MAP_SEED_PATH = DATABASE_DIRECTORY / "map_seed.sql"
 UNIT_TYPES_PATH = ROOT / "data" / "units" / "unit_types.csv"
 MAP_CELLS_PATH = ROOT / "data" / "maps" / "point_alpha_cells.csv"
+MAP_EDGES_PATH = ROOT / "data" / "maps" / "point_alpha_edges.csv"
+MAP_FEATURES_PATH = ROOT / "data" / "maps" / "point_alpha_features.csv"
 EXPORT_DIRECTORY = DATABASE_DIRECTORY / "exports"
 OUTPUT_DIRECTORY = ROOT / "generated"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DEFAULT_SCENARIO = "a2_command_post"
 DEFAULT_PRODUCTION_MAP = "point_alpha_corridor"
 
@@ -223,6 +225,79 @@ def import_map_cells(connection: sqlite3.Connection, path: Path = MAP_CELLS_PATH
     return len(records)
 
 
+def import_map_edges(connection: sqlite3.Connection, path: Path = MAP_EDGES_PATH) -> int:
+    expected_fields = {
+        "map_key", "x", "y", "direction", "neighbor_x", "neighbor_y",
+        "road_class", "river_class", "crossing_type", "source_status",
+    }
+    map_ids = lookup(connection, "map", "map_id", "map_key")
+    try:
+        source = path.open("r", encoding="utf-8", newline="")
+    except OSError as error:
+        raise DataError(f"Cannot read {path.relative_to(ROOT)}: {error}") from error
+    with source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames is None or set(reader.fieldnames) != expected_fields:
+            raise DataError("point_alpha_edges.csv columns do not match the map-edge schema")
+        records = list(reader)
+    insert_sql = """
+        INSERT INTO map_edge(
+            map_id, x, y, direction, neighbor_x, neighbor_y, road_class,
+            river_class, crossing_type, source_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    for record in records:
+        try:
+            connection.execute(insert_sql, (
+                map_ids[record["map_key"]], int(record["x"]), int(record["y"]),
+                int(record["direction"]), int(record["neighbor_x"]),
+                int(record["neighbor_y"]), int(record["road_class"]),
+                int(record["river_class"]), record["crossing_type"],
+                record["source_status"],
+            ))
+        except (KeyError, ValueError, sqlite3.IntegrityError) as error:
+            raise DataError(f"Invalid map edge record: {record}: {error}") from error
+    return len(records)
+
+
+def import_map_features(connection: sqlite3.Connection, path: Path = MAP_FEATURES_PATH) -> int:
+    expected_fields = {
+        "map_key", "feature_id", "feature_type", "feature_class", "sequence",
+        "easting_m", "northing_m", "source_status",
+    }
+    map_ids = lookup(connection, "map", "map_id", "map_key")
+    try:
+        source = path.open("r", encoding="utf-8", newline="")
+    except OSError as error:
+        raise DataError(f"Cannot read {path.relative_to(ROOT)}: {error}") from error
+    with source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames is None or set(reader.fieldnames) != expected_fields:
+            raise DataError("point_alpha_features.csv columns do not match the feature schema")
+        records = list(reader)
+    seen: set[tuple[int, int]] = set()
+    for record in records:
+        try:
+            map_id = map_ids[record["map_key"]]
+            feature_id = int(record["feature_id"])
+            key = (map_id, feature_id)
+            if key not in seen:
+                connection.execute(
+                    "INSERT INTO map_feature VALUES (?, ?, ?, ?, ?)",
+                    (map_id, feature_id, record["feature_type"],
+                     int(record["feature_class"]), record["source_status"]),
+                )
+                seen.add(key)
+            connection.execute(
+                "INSERT INTO map_feature_vertex VALUES (?, ?, ?, ?, ?)",
+                (map_id, feature_id, int(record["sequence"]),
+                 float(record["easting_m"]), float(record["northing_m"])),
+            )
+        except (KeyError, ValueError, sqlite3.IntegrityError) as error:
+            raise DataError(f"Invalid map feature record: {record}: {error}") from error
+    return len(seen)
+
+
 def initialize_database(path: Path = DATABASE_PATH, force: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and not force:
@@ -237,6 +312,8 @@ def initialize_database(path: Path = DATABASE_PATH, force: bool = False) -> None
             import_unit_types(connection)
             connection.executescript(read_sql(MAP_SEED_PATH))
             import_map_cells(connection)
+            import_map_edges(connection)
+            import_map_features(connection)
             connection.executescript(read_sql(SCENARIO_SEED_PATH))
             connection.commit()
         finally:
@@ -272,6 +349,8 @@ def validate_database(path: Path = DATABASE_PATH) -> dict[str, int]:
         scenario_count = scalar(connection, "SELECT COUNT(*) FROM scenario")
         map_count = scalar(connection, "SELECT COUNT(*) FROM map")
         map_cell_count = scalar(connection, "SELECT COUNT(*) FROM map_cell")
+        map_edge_count = scalar(connection, "SELECT COUNT(*) FROM map_edge")
+        map_feature_count = scalar(connection, "SELECT COUNT(*) FROM map_feature")
         if not unit_type_count or not scenario_count:
             raise DataError("Database requires unit types and at least one scenario")
         runtime_ids = [row[0] for row in connection.execute(
@@ -332,6 +411,28 @@ def validate_database(path: Path = DATABASE_PATH) -> dict[str, int]:
         if bad_map_cells or incomplete_maps or unsourced_maps:
             raise DataError("Database contains incomplete, out-of-bounds, or unsourced map data")
 
+        bad_edges = scalar(connection, """
+            SELECT COUNT(*) FROM map_edge me JOIN map m ON m.map_id = me.map_id
+            WHERE me.x >= m.width OR me.y >= m.height
+               OR me.neighbor_x >= m.width OR me.neighbor_y >= m.height
+               OR (me.road_class = 0 AND me.river_class = 0)
+               OR (me.crossing_type = 'bridge' AND
+                   (me.road_class = 0 OR me.river_class = 0))
+        """)
+        orphan_vertices = scalar(connection, """
+            SELECT COUNT(*) FROM map_feature_vertex v
+            LEFT JOIN map_feature f
+              ON f.map_id = v.map_id AND f.feature_id = v.feature_id
+            WHERE f.feature_id IS NULL
+        """)
+        short_features = scalar(connection, """
+            SELECT COUNT(*) FROM map_feature f
+            WHERE (SELECT COUNT(*) FROM map_feature_vertex v
+                   WHERE v.map_id = f.map_id AND v.feature_id = f.feature_id) < 2
+        """)
+        if bad_edges or orphan_vertices or short_features:
+            raise DataError("Database contains invalid map topology or feature geometry")
+
         validate_feature_links(connection)
 
         for formation in connection.execute(
@@ -358,6 +459,8 @@ def validate_database(path: Path = DATABASE_PATH) -> dict[str, int]:
         "scenario_units": unit_count,
         "maps": map_count,
         "map_cells": map_cell_count,
+        "map_edges": map_edge_count,
+        "map_features": map_feature_count,
     }
 
 
@@ -408,8 +511,8 @@ def export_database(path: Path = DATABASE_PATH, output: Path = EXPORT_DIRECTORY)
         """)
         write_query_csv(connection, output / "maps.csv", """
             SELECT map_id, map_key, display_name, width, height, cell_size_m,
-                   crs, origin_easting_m, origin_northing_m, geographic_status,
-                   source_path
+                   crs, origin_easting_m, origin_northing_m, extent_width_m,
+                   extent_height_m, geographic_status, source_path
             FROM map ORDER BY map_id
         """)
         write_query_csv(connection, output / "map_sources.csv", """
@@ -427,6 +530,21 @@ def export_database(path: Path = DATABASE_PATH, output: Path = EXPORT_DIRECTORY)
             FROM map_cell mc JOIN map m ON m.map_id = mc.map_id
             JOIN terrain_type tt ON tt.terrain_id = mc.terrain_id
             ORDER BY m.map_id, mc.y, mc.x
+        """)
+        write_query_csv(connection, output / "map_edges.csv", """
+            SELECT m.map_key, me.x, me.y, me.direction, me.neighbor_x,
+                   me.neighbor_y, me.road_class, me.river_class,
+                   me.crossing_type, me.source_status
+            FROM map_edge me JOIN map m ON m.map_id = me.map_id
+            ORDER BY m.map_id, me.y, me.x, me.direction
+        """)
+        write_query_csv(connection, output / "map_features.csv", """
+            SELECT m.map_key, f.feature_id, f.feature_type, f.feature_class,
+                   v.sequence, v.easting_m, v.northing_m, f.source_status
+            FROM map_feature f JOIN map m ON m.map_id = f.map_id
+            JOIN map_feature_vertex v
+              ON v.map_id = f.map_id AND v.feature_id = f.feature_id
+            ORDER BY m.map_id, f.feature_id, v.sequence
         """)
 
 
