@@ -1,6 +1,0 @@
-{
-  "units": [
-    {"side": "NATO", "type": "armor", "x": 5, "y": 10, "strength": 10},
-    {"side": "WARSAW", "type": "armor", "x": 15, "y": 4, "strength": 10}
-  ]
-}

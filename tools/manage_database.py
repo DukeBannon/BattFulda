@@ -1,4 +1,4 @@
-"""Create, validate, export, and compile the Battalion: Fulda SQLite data."""
+"""Create, validate, and export the Battalion: Fulda SQLite data."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from contextlib import closing
 import csv
 from pathlib import Path
 import sqlite3
-import struct
 import sys
 from typing import Iterable, Sequence
 
@@ -24,7 +23,6 @@ MAP_CELLS_PATH = ROOT / "data" / "maps" / "point_alpha_cells.csv"
 MAP_EDGES_PATH = ROOT / "data" / "maps" / "point_alpha_edges.csv"
 MAP_FEATURES_PATH = ROOT / "data" / "maps" / "point_alpha_features.csv"
 EXPORT_DIRECTORY = DATABASE_DIRECTORY / "exports"
-OUTPUT_DIRECTORY = ROOT / "generated"
 SCHEMA_VERSION = 6
 DEFAULT_SCENARIO = "a2_command_post"
 DEFAULT_PRODUCTION_MAP = "point_alpha_corridor"
@@ -570,169 +568,6 @@ def save_map_seed(
         """, (map_key,))
 
 
-def encoded_label(value: str, field: str) -> bytes:
-    try:
-        encoded = value.encode("ascii")
-    except UnicodeEncodeError as error:
-        raise DataError(f"{field} must use Amiga-safe ASCII characters") from error
-    if len(encoded) > 255:
-        raise DataError(f"{field} is too long")
-    return encoded + b"\0"
-
-
-def append_string(table: bytearray, value: str, field: str) -> int:
-    offset = len(table)
-    table.extend(encoded_label(value, field))
-    if offset > 65535:
-        raise DataError("Compiled string table exceeds 65535 bytes")
-    return offset
-
-
-def compile_unit_types(connection: sqlite3.Connection) -> bytes:
-    rows = list(connection.execute("""
-        SELECT unit_type_id, type_key, faction_id, nation_id, echelon_id, category_id,
-               mobility_id, move_points, hard_attack, soft_attack, defense,
-               range_cells, recon, command, display_name
-        FROM unit_type ORDER BY unit_type_id
-    """))
-    strings = bytearray()
-    records = bytearray()
-    record_format = ">BBBBBBBBBBBBH"
-    record_size = struct.calcsize(record_format)
-    header_size = struct.calcsize(">4sBBBH")
-    for row in rows:
-        name_offset = append_string(strings, row["display_name"], row["type_key"])
-        records.extend(struct.pack(
-            record_format, row["faction_id"], row["nation_id"], row["echelon_id"],
-            row["category_id"], row["mobility_id"], row["move_points"],
-            row["hard_attack"], row["soft_attack"], row["defense"],
-            row["range_cells"], row["recon"], row["command"], name_offset,
-        ))
-    strings_offset = header_size + len(records)
-    return struct.pack(">4sBBBH", b"BFUT", 1, len(rows), record_size, strings_offset) + records + strings
-
-
-def scenario_row(connection: sqlite3.Connection, scenario_key: str) -> sqlite3.Row:
-    row = connection.execute("""
-        SELECT s.*, m.width, m.height FROM scenario s
-        JOIN map m ON m.map_id = s.map_id WHERE s.scenario_key = ?
-    """, (scenario_key,)).fetchone()
-    if row is None:
-        raise DataError(f"Unknown scenario: {scenario_key}")
-    return row
-
-
-def compile_formations(connection: sqlite3.Connection, scenario_key: str) -> bytes:
-    scenario = scenario_row(connection, scenario_key)
-    rows = list(connection.execute("""
-        SELECT formation_id, parent_formation_id, faction_id, nation_id,
-               formation_kind_id, command_rating, base_morale, display_name,
-               formation_key
-        FROM formation WHERE scenario_id = ? ORDER BY formation_id
-    """, (scenario["scenario_id"],)))
-    strings = bytearray()
-    records = bytearray()
-    record_format = ">BBBBBBBH"
-    record_size = struct.calcsize(record_format)
-    header_size = struct.calcsize(">4sBBBH")
-    for row in rows:
-        name_offset = append_string(strings, row["display_name"], row["formation_key"])
-        parent = 255 if row["parent_formation_id"] is None else row["parent_formation_id"]
-        records.extend(struct.pack(
-            record_format, row["formation_id"], parent, row["faction_id"],
-            row["nation_id"], row["formation_kind_id"], row["command_rating"],
-            row["base_morale"], name_offset,
-        ))
-    strings_offset = header_size + len(records)
-    return struct.pack(">4sBBBH", b"BFFM", 1, len(rows), record_size, strings_offset) + records + strings
-
-
-def compile_scenario(connection: sqlite3.Connection, scenario_key: str) -> bytes:
-    scenario = scenario_row(connection, scenario_key)
-    units = list(connection.execute("""
-        SELECT scenario_unit_id, unit_type_id, formation_id, x, y, strength,
-               morale, suppression, readiness, display_name, unit_key
-        FROM scenario_unit WHERE scenario_id = ? ORDER BY scenario_unit_id
-    """, (scenario["scenario_id"],)))
-    formation_count = scalar(
-        connection, "SELECT COUNT(*) FROM formation WHERE scenario_id = ?",
-        (scenario["scenario_id"],),
-    )
-    record_format = ">BBBBBBBBBH"
-    records = bytearray()
-    strings = bytearray()
-    for row in units:
-        name_offset = append_string(strings, row["display_name"], row["unit_key"])
-        records.extend(struct.pack(
-            record_format, row["scenario_unit_id"], row["unit_type_id"],
-            row["formation_id"], row["x"], row["y"], row["strength"],
-            row["morale"], row["suppression"], row["readiness"], name_offset,
-        ))
-    header_format = ">4sBBBBBBBBBBH"
-    header_size = struct.calcsize(header_format)
-    strings_offset = header_size + len(records)
-    header = struct.pack(
-        header_format, b"BFSC", 2, scenario["scenario_id"], scenario["width"],
-        scenario["height"], scenario["turn_minutes"], scenario["cursor_x"],
-        scenario["cursor_y"], formation_count, len(units),
-        struct.calcsize(record_format), strings_offset,
-    )
-    return header + records + strings
-
-
-def compile_map(connection: sqlite3.Connection, map_key: str) -> bytes:
-    game_map = connection.execute(
-        "SELECT * FROM map WHERE map_key = ?", (map_key,)
-    ).fetchone()
-    if game_map is None:
-        raise DataError(f"Unknown map: {map_key}")
-    if game_map["origin_easting_m"] is None or game_map["origin_northing_m"] is None:
-        raise DataError(f"Map {map_key} has no projected origin")
-    cells = list(connection.execute("""
-        SELECT terrain_id, elevation_m, road_class, river_class,
-               settlement_level, has_bridge
-        FROM map_cell WHERE map_id = ? ORDER BY y, x
-    """, (game_map["map_id"],)))
-    expected = game_map["width"] * game_map["height"]
-    if len(cells) != expected:
-        raise DataError(f"Map {map_key} has {len(cells)} cells; expected {expected}")
-    record_format = ">BhBBBB"
-    records = b"".join(
-        struct.pack(
-            record_format, row["terrain_id"], row["elevation_m"],
-            row["road_class"], row["river_class"], row["settlement_level"],
-            row["has_bridge"],
-        )
-        for row in cells
-    )
-    header = struct.pack(
-        ">4sBBBBBHII", b"BFMP", 1, game_map["map_id"], game_map["width"],
-        game_map["height"], struct.calcsize(record_format), game_map["cell_size_m"],
-        game_map["origin_easting_m"], game_map["origin_northing_m"],
-    )
-    return header + records
-
-
-def compile_database_assets(
-    path: Path = DATABASE_PATH,
-    output: Path = OUTPUT_DIRECTORY,
-    scenario_key: str = DEFAULT_SCENARIO,
-    map_key: str = DEFAULT_PRODUCTION_MAP,
-) -> dict[str, bytes]:
-    validate_database(path)
-    with closing(connect(path)) as connection:
-        assets = {
-            "unit_types.bin": compile_unit_types(connection),
-            "formations.bin": compile_formations(connection, scenario_key),
-            "a2_scenario.bin": compile_scenario(connection, scenario_key),
-            "point_alpha_map.bin": compile_map(connection, map_key),
-        }
-    output.mkdir(parents=True, exist_ok=True)
-    for name, contents in assets.items():
-        (output / name).write_bytes(contents)
-    return assets
-
-
 def report(counts: dict[str, int]) -> str:
     return ", ".join(f"{value} {name.replace('_', ' ')}" for name, value in counts.items())
 
@@ -749,9 +584,6 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     save_map_parser.add_argument("--map", default=DEFAULT_PRODUCTION_MAP)
     save_map_parser.add_argument("--output", type=Path, default=MAP_CELLS_PATH)
-    compile_parser = subparsers.add_parser("compile", help="compile Amiga database assets")
-    compile_parser.add_argument("--scenario", default=DEFAULT_SCENARIO)
-    compile_parser.add_argument("--map", default=DEFAULT_PRODUCTION_MAP)
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     try:
@@ -768,11 +600,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         elif args.command == "save-map":
             save_map_seed(map_key=args.map, output=args.output)
             print(f"Saved map seed to {args.output}")
-        elif args.command == "compile":
-            assets = compile_database_assets(scenario_key=args.scenario, map_key=args.map)
-            for name, contents in assets.items():
-                print(f"Generated {name}: {len(contents)} bytes")
-    except (DataError, OSError, sqlite3.Error, struct.error) as error:
+    except (DataError, OSError, sqlite3.Error) as error:
         print(f"Database error: {error}", file=sys.stderr)
         return 1
     return 0

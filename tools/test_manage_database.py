@@ -1,6 +1,5 @@
 import csv
 from pathlib import Path
-import struct
 import tempfile
 import unittest
 
@@ -135,28 +134,6 @@ class DatabaseTests(unittest.TestCase):
             connection.close()
         with self.assertRaisesRegex(manage_database.DataError, "one-way link"):
             manage_database.validate_database(self.database)
-
-    def test_compact_binary_headers_and_sizes(self) -> None:
-        output = self.root / "generated"
-        assets = manage_database.compile_database_assets(self.database, output)
-
-        unit_header = struct.unpack(">4sBBBH", assets["unit_types.bin"][:9])
-        self.assertEqual(unit_header, (b"BFUT", 1, 64, 14, 905))
-
-        formation_header = struct.unpack(">4sBBBH", assets["formations.bin"][:9])
-        self.assertEqual(formation_header, (b"BFFM", 1, 5, 9, 54))
-
-        scenario_header = struct.unpack(">4sBBBBBBBBBBH", assets["a2_scenario.bin"][:16])
-        self.assertEqual(
-            scenario_header,
-            (b"BFSC", 2, 0, 92, 80, 15, 19, 48, 5, 11, 11, 137),
-        )
-        self.assertGreater(len(assets["a2_scenario.bin"]), 16 + 11 * 11)
-        self.assertIn(b"Team Alpha Headquarters\0", assets["a2_scenario.bin"])
-
-        map_header = struct.unpack(">4sBBBBBHII", assets["point_alpha_map.bin"][:19])
-        self.assertEqual(map_header, (b"BFMP", 1, 1, 92, 80, 7, 250, 554000, 5610000))
-        self.assertEqual(len(assets["point_alpha_map.bin"]), 19 + 92 * 80 * 7)
 
     def test_runtime_ids_may_repeat_in_different_scenarios(self) -> None:
         connection = manage_database.connect(self.database)
