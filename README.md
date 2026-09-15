@@ -18,7 +18,7 @@ Visual Studio 2026 is the recommended IDE. PowerShell and `dotnet` remain the
 authoritative build path, so an IDE-specific project configuration is never
 required to reproduce a build.
 
-## Build and run W1
+## Build and run W2.3
 
 Open `BattalionFulda.sln` in Visual Studio 2026, or run:
 
@@ -27,12 +27,26 @@ cd C:\Repositories\Games\BattFulda
 .\build-windows.ps1 -Run
 ```
 
-W1 loads the 92 by 80 Point Alpha battlefield at 250 meters per hex. It retains
+W2.3 loads the 92 by 80 Point Alpha battlefield at 250 meters per hex. It retains
 the original projected road and river paths, derives bridges at their geographic
 intersections, distinguishes cultivated terrain, and caches visible terrain
 chunks for smooth navigation. The compact hex-edge topology and full geographic
-feature paths are both editable external data backed by SQLite. See `docs\W1.md`
-for its acceptance target and regeneration workflow.
+feature paths are both editable external data backed by SQLite.
+
+Right-click a friendly unit to open its cascading action menu. Choose a movement
+posture, then click or press Enter to add waypoints. Double-click or use the
+footer to confirm the plan; Backspace undoes a waypoint and Escape cancels the
+draft. Route previews use data-driven A* pathfinding with mobility-specific
+terrain, road, elevation, bridge, ford, stream, and river costs. Illegal routes
+are marked in red and cannot be confirmed.
+
+The Execute footer command resolves every confirmed movement order
+simultaneously across the scenario's 15-minute turn. Counters animate between
+hexes, Quick/Tactical/Hunt costs determine their progress, occupied hexes cause
+traffic holds, and unfinished routes carry into the next turn. Pause and Resume
+are available during playback; completed movement enters a review phase before
+the next planning turn. See `docs\W2.3.md` for the milestone boundary and
+acceptance target.
 
 ## Relational data foundation
 
@@ -52,15 +66,18 @@ can be used to inspect and edit the authoritative database.
 ## W1 geographic map foundation
 
 The Windows production map covers a 20 by 20 km Point Alpha corridor with 7,360
-regular flat-top hexes at 250 meters center-to-center. SQLite schema version 6
-stores cells, connected feature edges, and original projected feature vertices.
-This gives the renderer natural roads and waterways while preserving the
-topology needed for W2 route planning and crossing rules.
+regular flat-top hexes at 250 meters center-to-center. W1 introduced SQLite
+schema version 6 for cells, connected feature edges, and original projected
+feature vertices. W2.2 added movement costs and actual water-crossing
+boundaries; W2.3 advances the current store to version 8 with a data-driven
+scenario start clock. This gives the renderer natural
+roads and waterways while preserving authoritative route topology.
 
 Road-over-water bridges are derived from actual vector intersections. This
 keeps roads from visually crossing streams or rivers without a bridge and gives
 W2 a corresponding legal crossing edge.
 
 Cultivated terrain is distinct from clear ground. Road classes and stream,
-minor-river, and major-river classes are present now; their movement-time
-effects will remain database data introduced in W2.
+minor-river, and major-river classes now have database-driven movement effects.
+Geographic waterways and actual crossing edges are stored separately so a path
+crosses water only where its hex boundary intersects the mapped watercourse.

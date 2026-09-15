@@ -1,0 +1,6 @@
+parameter_key,value_integer,notes
+downhill_cost_per_step,1,Additional cost per elevation step when descending.
+elevation_step_m,25,Elevation interval used to calculate movement penalties.
+minimum_step_cost,4,Lower bound used by the A-star heuristic.
+road_access_penalty,8,"Cost for entering, leaving, or cutting across a road hex without following its connected road edge."
+uphill_cost_per_step,2,Additional cost per elevation step when climbing.

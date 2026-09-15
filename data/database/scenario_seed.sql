@@ -1,9 +1,10 @@
 INSERT INTO scenario(
     scenario_id, scenario_key, display_name, map_id, scenario_year,
-    turn_minutes, cursor_x, cursor_y, notes
+    start_datetime, turn_minutes, cursor_x, cursor_y, notes
 ) VALUES (
     0, 'a2_command_post', 'Point Alpha Data Demonstration', 1, 1985,
-    15, 19, 48, 'Illustrative unit placement on the W1 production map.'
+    '1985-06-06T06:00:00', 15, 19, 48,
+    'Illustrative unit placement on the W1 production map.'
 );
 
 INSERT INTO formation(

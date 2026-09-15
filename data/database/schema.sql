@@ -110,6 +110,47 @@ CREATE TABLE terrain_type (
     concealment_rating INTEGER NOT NULL CHECK (concealment_rating BETWEEN 0 AND 15)
 );
 
+CREATE TABLE terrain_movement_cost (
+    mobility_id INTEGER NOT NULL REFERENCES mobility_class(mobility_id),
+    terrain_id INTEGER NOT NULL REFERENCES terrain_type(terrain_id),
+    passable INTEGER NOT NULL CHECK (passable IN (0, 1)),
+    quick_cost INTEGER CHECK (quick_cost IS NULL OR quick_cost > 0),
+    tactical_cost INTEGER CHECK (tactical_cost IS NULL OR tactical_cost > 0),
+    hunt_cost INTEGER CHECK (hunt_cost IS NULL OR hunt_cost > 0),
+    PRIMARY KEY (mobility_id, terrain_id),
+    CHECK (
+        (passable = 0 AND quick_cost IS NULL AND tactical_cost IS NULL AND hunt_cost IS NULL)
+        OR
+        (passable = 1 AND quick_cost IS NOT NULL AND tactical_cost IS NOT NULL AND hunt_cost IS NOT NULL)
+    )
+);
+
+CREATE TABLE road_movement_cost (
+    mobility_id INTEGER NOT NULL REFERENCES mobility_class(mobility_id),
+    road_class INTEGER NOT NULL CHECK (road_class BETWEEN 1 AND 3),
+    quick_cost INTEGER NOT NULL CHECK (quick_cost > 0),
+    tactical_cost INTEGER NOT NULL CHECK (tactical_cost > 0),
+    hunt_cost INTEGER NOT NULL CHECK (hunt_cost > 0),
+    PRIMARY KEY (mobility_id, road_class)
+);
+
+CREATE TABLE water_crossing_cost (
+    mobility_id INTEGER NOT NULL REFERENCES mobility_class(mobility_id),
+    river_class INTEGER NOT NULL CHECK (river_class BETWEEN 1 AND 3),
+    crossing_type TEXT NOT NULL CHECK (crossing_type IN ('none', 'bridge', 'ford')),
+    requires_amphibious INTEGER NOT NULL CHECK (requires_amphibious IN (0, 1)),
+    quick_cost INTEGER NOT NULL CHECK (quick_cost > 0),
+    tactical_cost INTEGER NOT NULL CHECK (tactical_cost > 0),
+    hunt_cost INTEGER NOT NULL CHECK (hunt_cost > 0),
+    PRIMARY KEY (mobility_id, river_class, crossing_type)
+);
+
+CREATE TABLE movement_parameter (
+    parameter_key TEXT PRIMARY KEY,
+    value_integer INTEGER NOT NULL CHECK (value_integer >= 0),
+    notes TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE map_cell (
     map_id INTEGER NOT NULL REFERENCES map(map_id) ON DELETE CASCADE,
     x INTEGER NOT NULL CHECK (x BETWEEN 0 AND 254),
@@ -146,6 +187,18 @@ CREATE TABLE map_edge (
     UNIQUE (map_id, x, y, neighbor_x, neighbor_y)
 );
 
+CREATE TABLE map_crossing_edge (
+    map_id INTEGER NOT NULL REFERENCES map(map_id) ON DELETE CASCADE,
+    x INTEGER NOT NULL CHECK (x BETWEEN 0 AND 254),
+    y INTEGER NOT NULL CHECK (y BETWEEN 0 AND 254),
+    neighbor_x INTEGER NOT NULL CHECK (neighbor_x BETWEEN 0 AND 254),
+    neighbor_y INTEGER NOT NULL CHECK (neighbor_y BETWEEN 0 AND 254),
+    river_class INTEGER NOT NULL CHECK (river_class BETWEEN 1 AND 3),
+    crossing_type TEXT NOT NULL CHECK (crossing_type IN ('none', 'bridge', 'ford')),
+    source_status TEXT NOT NULL CHECK (source_status IN ('derived', 'draft', 'reviewed')),
+    PRIMARY KEY (map_id, x, y, neighbor_x, neighbor_y)
+);
+
 CREATE TABLE map_feature (
     map_id INTEGER NOT NULL REFERENCES map(map_id) ON DELETE CASCADE,
     feature_id INTEGER NOT NULL,
@@ -172,6 +225,7 @@ CREATE TABLE scenario (
     display_name TEXT NOT NULL,
     map_id INTEGER NOT NULL REFERENCES map(map_id),
     scenario_year INTEGER NOT NULL CHECK (scenario_year BETWEEN 1945 AND 2100),
+    start_datetime TEXT NOT NULL CHECK (datetime(start_datetime) IS NOT NULL),
     turn_minutes INTEGER NOT NULL CHECK (turn_minutes BETWEEN 1 AND 255),
     cursor_x INTEGER NOT NULL CHECK (cursor_x BETWEEN 0 AND 254),
     cursor_y INTEGER NOT NULL CHECK (cursor_y BETWEEN 0 AND 254),
@@ -271,7 +325,9 @@ SELECT
     su.morale,
     su.suppression,
     su.readiness,
-    ut.amphibious
+    ut.amphibious,
+    m.mobility_key AS mobility,
+    ut.move_points
 FROM scenario_unit su
 JOIN scenario s ON s.scenario_id = su.scenario_id
 JOIN formation fo
@@ -280,5 +336,6 @@ LEFT JOIN formation parent
   ON parent.scenario_id = fo.scenario_id
  AND parent.formation_id = fo.parent_formation_id
 JOIN unit_type ut ON ut.unit_type_id = su.unit_type_id
+JOIN mobility_class m ON m.mobility_id = ut.mobility_id
 JOIN faction f ON f.faction_id = fo.faction_id
 JOIN nation n ON n.nation_id = fo.nation_id;

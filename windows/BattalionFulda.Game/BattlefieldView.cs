@@ -1,5 +1,6 @@
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
+using System.Diagnostics;
 
 namespace BattalionFulda;
 
@@ -12,6 +13,7 @@ internal sealed class BattlefieldView : Control
     private const int MiniMapHeight = 150;
     private const int TerrainChunkPixels = 1024;
     private const int TerrainChunkBleed = 4;
+    private const double PlaybackGameSecondsPerRealSecond = 90.0;
 
     private readonly GameData data;
     private readonly Font titleFont = new("Bahnschrift SemiCondensed", 18, FontStyle.Bold);
@@ -22,9 +24,15 @@ internal sealed class BattlefieldView : Control
     private readonly Font counterFont = new("Arial", 9, FontStyle.Bold);
     private readonly Bitmap? terrainAtlas = LoadTerrainAtlas();
     private readonly Dictionary<(int X, int Y), Bitmap> terrainChunks = [];
+    private readonly Dictionary<(int X, int Y, int RoadClass), MapVertex> roadSnapCache = [];
+    private readonly Dictionary<int, PlannedMoveOrder> plannedOrders = [];
+    private readonly ContextMenuStrip unitActionMenu = new();
+    private readonly AStarRoutePlanner routePlanner;
     private float terrainLayerCellSize;
     private Bitmap? miniMapLayer;
     private readonly System.Windows.Forms.Timer edgeScrollTimer = new() { Interval = 16 };
+    private readonly System.Windows.Forms.Timer executionTimer = new() { Interval = 16 };
+    private readonly Stopwatch executionClock = new();
     private float cellSize = 72f;
     private float cameraX = 4.5f;
     private float cameraY = 14.5f;
@@ -37,6 +45,13 @@ internal sealed class BattlefieldView : Control
     private bool dragMoved;
     private MouseButtons dragButton;
     private bool navigatingMiniMap;
+    private PlannedMoveOrder? plottingOrder;
+    private WegoMovementExecution? movementExecution;
+    private TurnPhase turnPhase = TurnPhase.Planning;
+    private bool executionPaused;
+    private int turnNumber = 1;
+    private DateTime scenarioTime;
+    private int lastOpposingOrderCount;
 
     private float HexHeight => cellSize * 0.8660254f;
     private float HexColumnStep => cellSize * 0.75f;
@@ -44,6 +59,8 @@ internal sealed class BattlefieldView : Control
     public BattlefieldView(GameData data)
     {
         this.data = data;
+        scenarioTime = data.ScenarioStart;
+        routePlanner = new AStarRoutePlanner(data);
         DoubleBuffered = true;
         ResizeRedraw = true;
         TabStop = true;
@@ -52,17 +69,40 @@ internal sealed class BattlefieldView : Control
                  ControlStyles.UserPaint, true);
         edgeScrollTimer.Tick += (_, _) => EdgeScrollTick();
         edgeScrollTimer.Start();
+        executionTimer.Tick += (_, _) => ExecutionTick();
+        ConfigureUnitActionMenu();
     }
 
     public bool HandleKey(Keys key)
     {
+        if (turnPhase == TurnPhase.Executing && key == Keys.Space)
+        {
+            ToggleExecutionPause();
+            return true;
+        }
+        if (turnPhase == TurnPhase.Review && key == Keys.Enter)
+        {
+            BeginNextTurn();
+            return true;
+        }
+
         switch (key)
         {
             case Keys.A or Keys.Left: MoveCursor(-1, 0); return true;
             case Keys.D or Keys.Right: MoveCursor(1, 0); return true;
             case Keys.W or Keys.Up: MoveCursor(0, -1); return true;
             case Keys.S or Keys.Down: MoveCursor(0, 1); return true;
-            case Keys.Enter: SelectUnitAtCursor(); return true;
+            case Keys.Enter:
+                if (plottingOrder is not null) AddWaypointAtCursor();
+                else SelectUnitAtCursor();
+                return true;
+            case Keys.Back:
+                if (plottingOrder is not null) UndoWaypoint();
+                return plottingOrder is not null;
+            case Keys.Escape:
+                if (plottingOrder is not null) CancelPlotting();
+                else unitActionMenu.Close();
+                return true;
             case Keys.Add or Keys.Oemplus:
                 ZoomAt(new Point(Width / 2, Height / 2), 1.12f);
                 return true;
@@ -80,7 +120,338 @@ internal sealed class BattlefieldView : Control
             Math.Clamp(current.X + dx, 0, data.MapWidth - 1),
             Math.Clamp(current.Y + dy, 0, data.MapHeight - 1));
         EnsureCursorVisible();
+        if (plottingOrder is not null) RebuildRoute(plottingOrder);
         Invalidate();
+    }
+
+    private void ConfigureUnitActionMenu()
+    {
+        unitActionMenu.ShowImageMargin = false;
+        unitActionMenu.BackColor = Color.FromArgb(10, 38, 48);
+        unitActionMenu.ForeColor = Color.FromArgb(226, 235, 226);
+        unitActionMenu.Font = bodyFont;
+        unitActionMenu.Renderer = new TacticalMenuRenderer();
+
+        var move = new ToolStripMenuItem("MOVE");
+        move.DropDownItems.Add("Quick", null, (_, _) => BeginMoveOrder(OrderPosture.Quick));
+        move.DropDownItems.Add("Tactical", null, (_, _) => BeginMoveOrder(OrderPosture.Tactical));
+        move.DropDownItems.Add("Hunt", null, (_, _) => BeginMoveOrder(OrderPosture.Hunt));
+        move.DropDownOpening += (_, _) =>
+        {
+            foreach (ToolStripItem item in move.DropDownItems)
+            {
+                item.BackColor = Color.FromArgb(10, 38, 48);
+                item.ForeColor = Color.FromArgb(226, 235, 226);
+            }
+        };
+        unitActionMenu.Items.Add(move);
+        unitActionMenu.Items.Add(new ToolStripSeparator());
+        unitActionMenu.Items.Add("FIRE", null, (_, _) => ShowDeferredAction("FIRE — W2.4"));
+        unitActionMenu.Items.Add("ASSAULT", null, (_, _) => ShowDeferredAction("ASSAULT — W2.4"));
+        unitActionMenu.Items.Add("DEFEND", null, (_, _) => ShowDeferredAction("DEFEND — FUTURE"));
+        unitActionMenu.Items.Add(new ToolStripSeparator());
+        unitActionMenu.Items.Add("CANCEL ORDERS", null, (_, _) => ClearSelectedOrder());
+    }
+
+    private void ShowDeferredAction(string message)
+    {
+        orderNotice = message;
+        Invalidate();
+    }
+
+    private string? orderNotice;
+
+    private void ShowUnitActionMenu(Point location)
+    {
+        if (selectedUnit is null || turnPhase != TurnPhase.Planning) return;
+        bool friendly = selectedUnit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase);
+        unitActionMenu.Items[0].Enabled = friendly;
+        unitActionMenu.Items[2].Enabled = friendly;
+        unitActionMenu.Items[3].Enabled = friendly;
+        unitActionMenu.Items[4].Enabled = friendly;
+        unitActionMenu.Items[6].Enabled = friendly && plannedOrders.ContainsKey(selectedUnit.Id);
+        orderNotice = friendly ? null : "ENEMY UNIT — INFORMATION ONLY";
+        unitActionMenu.Show(this, location);
+        Invalidate();
+    }
+
+    private void BeginMoveOrder(OrderPosture posture)
+    {
+        if (turnPhase != TurnPhase.Planning || selectedUnit is null ||
+            !selectedUnit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        plottingOrder = new PlannedMoveOrder { Unit = selectedUnit, Posture = posture };
+        selectedCell = new Point(selectedUnit.X, selectedUnit.Y);
+        orderNotice = null;
+        RebuildRoute(plottingOrder);
+        Invalidate();
+    }
+
+    private void AddWaypointAtCursor()
+    {
+        if (selectedCell is Point cell) AddWaypoint(cell);
+    }
+
+    private void AddWaypoint(Point cell)
+    {
+        if (plottingOrder is null) return;
+        if (plottingOrder.Waypoints.Count > 0 && plottingOrder.Waypoints[^1] == cell)
+            return;
+        if (cell.X == plottingOrder.Unit.X && cell.Y == plottingOrder.Unit.Y &&
+            plottingOrder.Waypoints.Count == 0)
+            return;
+        plottingOrder.Waypoints.Add(cell);
+        selectedCell = cell;
+        RebuildRoute(plottingOrder);
+        Invalidate();
+    }
+
+    private void UndoWaypoint()
+    {
+        if (plottingOrder is null || plottingOrder.Waypoints.Count == 0) return;
+        plottingOrder.Waypoints.RemoveAt(plottingOrder.Waypoints.Count - 1);
+        Point end = plottingOrder.Waypoints.LastOrDefault(
+            new Point(plottingOrder.Unit.X, plottingOrder.Unit.Y));
+        selectedCell = end;
+        RebuildRoute(plottingOrder);
+        Invalidate();
+    }
+
+    private void ConfirmPlotting()
+    {
+        if (plottingOrder is null || plottingOrder.Waypoints.Count == 0) return;
+        if (!plottingOrder.IsReachable)
+        {
+            orderNotice = plottingOrder.FailureReason;
+            Invalidate();
+            return;
+        }
+        plottingOrder.Confirmed = true;
+        plottingOrder.ExecutionState = MoveOrderExecutionState.Planned;
+        plannedOrders[plottingOrder.Unit.Id] = plottingOrder;
+        orderNotice = $"{plottingOrder.Posture.ToString().ToUpperInvariant()} MOVE PLANNED";
+        plottingOrder = null;
+        Invalidate();
+    }
+
+    private void CancelPlotting()
+    {
+        plottingOrder = null;
+        orderNotice = "ORDER CANCELLED";
+        Invalidate();
+    }
+
+    private void ClearSelectedOrder()
+    {
+        if (turnPhase != TurnPhase.Planning || selectedUnit is null) return;
+        plannedOrders.Remove(selectedUnit.Id);
+        if (ReferenceEquals(plottingOrder?.Unit, selectedUnit)) plottingOrder = null;
+        orderNotice = "ORDERS CLEARED";
+        Invalidate();
+    }
+
+    private void BeginExecution()
+    {
+        if (turnPhase != TurnPhase.Planning || plottingOrder is not null) return;
+        lastOpposingOrderCount = GenerateOpposingMovementOrders();
+        PlannedMoveOrder[] executable = plannedOrders.Values
+            .Where(order => order.Confirmed && order.Route.Count > 1)
+            .ToArray();
+        if (executable.Length == 0)
+        {
+            orderNotice = "NO PLANNED MOVEMENT ORDERS";
+            Invalidate();
+            return;
+        }
+
+        unitActionMenu.Close();
+        movementExecution = new WegoMovementExecution(data, executable);
+        turnPhase = TurnPhase.Executing;
+        executionPaused = false;
+        orderNotice = $"TURN {turnNumber} EXECUTING — {executable.Length} UNITS" +
+                      (lastOpposingOrderCount > 0
+                          ? $" ({lastOpposingOrderCount} PACT ORDERS ISSUED)"
+                          : string.Empty);
+        executionClock.Restart();
+        executionTimer.Start();
+        Invalidate();
+    }
+
+    private int GenerateOpposingMovementOrders()
+    {
+        ScenarioUnit[] friendlyUnits = data.Units.Where(unit =>
+            unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (friendlyUnits.Length == 0) return 0;
+
+        int generated = 0;
+        foreach (ScenarioUnit unit in data.Units.Where(unit =>
+                     !unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (plannedOrders.TryGetValue(unit.Id, out PlannedMoveOrder? existing) &&
+                existing.ExecutionState == MoveOrderExecutionState.Partial &&
+                existing.Route.Count > 1)
+                continue;
+
+            ScenarioUnit objective = friendlyUnits.OrderBy(candidate =>
+                HexRange(new Point(unit.X, unit.Y), new Point(candidate.X, candidate.Y))).First();
+            Point start = new(unit.X, unit.Y);
+            Point desired = new(
+                Math.Clamp(unit.X + Math.Clamp(objective.X - unit.X, -12, 12),
+                    0, data.MapWidth - 1),
+                Math.Clamp(unit.Y + Math.Clamp(objective.Y - unit.Y, -12, 12),
+                    0, data.MapHeight - 1));
+
+            RouteResult? route = null;
+            foreach (Point cell in NearbyCells(desired, 4))
+            {
+                if (data.Units.Any(other => other.Id != unit.Id &&
+                    other.X == cell.X && other.Y == cell.Y))
+                    continue;
+                RouteResult candidate = routePlanner.FindRoute(
+                    unit, start, cell, OrderPosture.Tactical);
+                if (!candidate.Success || candidate.Cells.Count < 2) continue;
+                route = candidate;
+                break;
+            }
+            if (route is null) continue;
+
+            var order = new PlannedMoveOrder
+            {
+                Unit = unit,
+                Posture = OrderPosture.Tactical,
+                Confirmed = true,
+                TotalCost = route.Cost,
+                ExecutionState = MoveOrderExecutionState.Planned,
+                ExecutionNote = "OPPOSING FORCE ADVANCE"
+            };
+            order.Route.AddRange(route.Cells);
+            order.Waypoints.Add(route.Cells[^1]);
+            plannedOrders[unit.Id] = order;
+            generated++;
+        }
+        return generated;
+    }
+
+    private IEnumerable<Point> NearbyCells(Point center, int radius)
+    {
+        for (int distance = 0; distance <= radius; distance++)
+        for (int y = center.Y - distance; y <= center.Y + distance; y++)
+        for (int x = center.X - distance; x <= center.X + distance; x++)
+        {
+            if (Math.Max(Math.Abs(x - center.X), Math.Abs(y - center.Y)) != distance)
+                continue;
+            if (x >= 0 && x < data.MapWidth && y >= 0 && y < data.MapHeight)
+                yield return new Point(x, y);
+        }
+    }
+
+    private static int HexRange(Point first, Point second)
+    {
+        static (int X, int Y, int Z) Cube(Point point)
+        {
+            int x = point.X;
+            int z = point.Y - (point.X - (point.X & 1)) / 2;
+            return (x, -x - z, z);
+        }
+        var a = Cube(first);
+        var b = Cube(second);
+        return Math.Max(Math.Abs(a.X - b.X),
+            Math.Max(Math.Abs(a.Y - b.Y), Math.Abs(a.Z - b.Z)));
+    }
+
+    private void ExecutionTick()
+    {
+        if (turnPhase != TurnPhase.Executing || movementExecution is null) return;
+        if (executionPaused)
+        {
+            executionClock.Restart();
+            return;
+        }
+
+        double realSeconds = Math.Min(0.1, executionClock.Elapsed.TotalSeconds);
+        executionClock.Restart();
+        movementExecution.Advance(realSeconds * PlaybackGameSecondsPerRealSecond);
+        if (selectedUnit is not null)
+            selectedCell = new Point(selectedUnit.X, selectedUnit.Y);
+
+        if (movementExecution.IsComplete) CompleteExecution();
+        Invalidate();
+    }
+
+    private void CompleteExecution()
+    {
+        if (movementExecution is null) return;
+        executionTimer.Stop();
+        executionClock.Stop();
+        movementExecution.FinalizeTurn();
+        scenarioTime = scenarioTime.AddMinutes(data.TurnMinutes);
+        turnPhase = TurnPhase.Review;
+        executionPaused = false;
+        int completed = plannedOrders.Values.Count(order =>
+            order.ExecutionState == MoveOrderExecutionState.Complete);
+        int partial = plannedOrders.Values.Count(order =>
+            order.ExecutionState == MoveOrderExecutionState.Partial);
+        orderNotice = $"TURN {turnNumber} COMPLETE — {completed} ARRIVED, {partial} CONTINUING";
+    }
+
+    private void ToggleExecutionPause()
+    {
+        if (turnPhase != TurnPhase.Executing) return;
+        executionPaused = !executionPaused;
+        orderNotice = executionPaused ? "EXECUTION PAUSED" : $"TURN {turnNumber} EXECUTING";
+        executionClock.Restart();
+        Invalidate();
+    }
+
+    private void BeginNextTurn()
+    {
+        if (turnPhase != TurnPhase.Review) return;
+        foreach (int unitId in plannedOrders
+                     .Where(pair => pair.Value.ExecutionState == MoveOrderExecutionState.Complete)
+                     .Select(pair => pair.Key).ToArray())
+            plannedOrders.Remove(unitId);
+        movementExecution = null;
+        turnNumber++;
+        turnPhase = TurnPhase.Planning;
+        orderNotice = $"TURN {turnNumber} PLANNING";
+        Invalidate();
+    }
+
+    private void RebuildRoute(PlannedMoveOrder order)
+    {
+        order.Route.Clear();
+        order.TotalCost = 0;
+        order.IsReachable = true;
+        order.FailureReason = null;
+        Point start = new(order.Unit.X, order.Unit.Y);
+        order.Route.Add(start);
+        foreach (Point waypoint in order.Waypoints)
+        {
+            RouteResult segment = routePlanner.FindRoute(order.Unit, start, waypoint, order.Posture);
+            if (!AppendRouteSegment(order, segment)) return;
+            start = waypoint;
+        }
+
+        if (ReferenceEquals(order, plottingOrder) && selectedCell is Point preview &&
+            preview != start)
+        {
+            RouteResult segment = routePlanner.FindRoute(order.Unit, start, preview, order.Posture);
+            AppendRouteSegment(order, segment);
+        }
+    }
+
+    private static bool AppendRouteSegment(PlannedMoveOrder order, RouteResult segment)
+    {
+        if (!segment.Success)
+        {
+            order.IsReachable = false;
+            order.FailureReason = segment.FailureReason;
+            return false;
+        }
+        if (segment.Cells.Count > 1) order.Route.AddRange(segment.Cells.Skip(1));
+        order.TotalCost += segment.Cost;
+        return true;
     }
 
     private void SelectUnitAtCursor()
@@ -121,13 +492,18 @@ internal sealed class BattlefieldView : Control
         Rectangle map = MapBounds();
         Point pointer = PointToClient(Cursor.Position);
         Rectangle activationArea = Rectangle.Inflate(map, 32, 32);
-        if (!activationArea.Contains(pointer) || MiniMapBounds(map).Contains(pointer))
+        if (!activationArea.Contains(pointer) || FooterBounds().Contains(pointer) ||
+            MiniMapBounds(map).Contains(pointer))
             return;
 
         float oldX = cameraX;
         float oldY = cameraY;
         cameraX += EdgeScrollDelta(pointer.X, map.Left, map.Right);
-        cameraY += EdgeScrollDelta(pointer.Y, map.Top, map.Bottom);
+        float verticalDelta = EdgeScrollDelta(pointer.Y, map.Top, map.Bottom);
+        int footerCommandRight = 20 + FooterCommands().Length * 116;
+        bool enteringFooterCommands = verticalDelta > 0 &&
+                                      pointer.X <= footerCommandRight + 24;
+        if (!enteringFooterCommands) cameraY += verticalDelta;
         ClampCamera();
 
         if (Math.Abs(cameraX - oldX) > 0.0001f || Math.Abs(cameraY - oldY) > 0.0001f)
@@ -197,7 +573,17 @@ internal sealed class BattlefieldView : Control
             x += g.MeasureString(menu, menuFont).Width + 30;
         }
 
-        string turn = "TURN 1     06 JUN 1985     0600";
+        string phase = turnPhase switch
+        {
+            TurnPhase.Executing => executionPaused ? "PAUSED" : "EXECUTING",
+            TurnPhase.Review => "REVIEW",
+            _ => "PLANNING"
+        };
+        DateTime displayedTime = turnPhase == TurnPhase.Executing && movementExecution is not null
+            ? scenarioTime.AddSeconds(movementExecution.ElapsedGameSeconds)
+            : scenarioTime;
+        string turn = $"TURN {turnNumber}  {phase}     " +
+                      $"{displayedTime:dd MMM yyyy}     {displayedTime:HHmm}".ToUpperInvariant();
         SizeF turnSize = g.MeasureString(turn, bodyBoldFont);
         g.DrawString(turn, bodyBoldFont, ink, Width - turnSize.Width - 18, 14);
     }
@@ -235,6 +621,45 @@ internal sealed class BattlefieldView : Control
             DrawStat(g, "SUPPRESSION", selectedUnit.Suppression.ToString(), x, ref y, primary, secondary);
             DrawStat(g, "READINESS", selectedUnit.Readiness.ToString(), x, ref y, primary, secondary);
             DrawStat(g, "AMPHIBIOUS", selectedUnit.Amphibious ? "YES" : "NO", x, ref y, primary, secondary);
+            PlannedMoveOrder? order = plottingOrder?.Unit.Id == selectedUnit.Id
+                ? plottingOrder
+                : plannedOrders.GetValueOrDefault(selectedUnit.Id);
+            if (order is not null)
+            {
+                y += 7;
+                g.DrawLine(border, x, y, bounds.Right - 17, y);
+                y += 13;
+                g.DrawString("ORDERS", headingFont, accent, x, y);
+                y += 31;
+                DrawStat(g, "TYPE", $"{order.Posture.ToString().ToUpperInvariant()} MOVE",
+                    x, ref y, primary, secondary);
+                DrawStat(g, "STATUS", order.Status, x, ref y, primary, secondary);
+                DrawStat(g, "WAYPOINTS", order.Waypoints.Count.ToString(),
+                    x, ref y, primary, secondary);
+                DrawStat(g, "ROUTE COST", order.IsReachable
+                    ? $"{order.TotalCost / 10f:0.0}"
+                    : "UNREACHABLE", x, ref y, primary, secondary);
+                if (order.ExecutionState is MoveOrderExecutionState.Executing or
+                    MoveOrderExecutionState.Partial)
+                {
+                    DrawStat(g, "TURN COST", $"{order.LastTurnCost / 10f:0.0}",
+                        x, ref y, primary, secondary);
+                    UnitMovementExecution? execution = movementExecution?.ForUnit(selectedUnit);
+                    if (execution?.WaitingForTraffic == true)
+                    {
+                        DrawStat(g, "MOVEMENT", "TRAFFIC HOLD", x, ref y, primary, secondary);
+                        if (!string.IsNullOrWhiteSpace(order.ExecutionNote))
+                        {
+                            g.DrawString(order.ExecutionNote, bodyFont, accent,
+                                new RectangleF(x + 8, y - 2, bounds.Width - 42, 42));
+                            y += 40;
+                        }
+                    }
+                    else if (!string.IsNullOrWhiteSpace(order.ExecutionNote))
+                        DrawStat(g, "MOVEMENT", order.ExecutionNote == "TRAFFIC BYPASS"
+                            ? "BYPASS USED" : "REROUTED", x, ref y, primary, secondary);
+                }
+            }
         }
         else
         {
@@ -308,6 +733,11 @@ internal sealed class BattlefieldView : Control
         g.SetClip(bounds);
         DrawTerrainChunks(g, bounds);
 
+        foreach (PlannedMoveOrder order in plannedOrders.Values)
+            DrawOrderRoute(g, bounds, order, false);
+        if (plottingOrder is not null)
+            DrawOrderRoute(g, bounds, plottingOrder, true);
+
         int firstX = Math.Max(0, (int)Math.Floor(cameraX) - 2);
         int firstY = Math.Max(0, (int)Math.Floor(cameraY) - 2);
         int lastX = Math.Min(data.MapWidth - 1,
@@ -319,23 +749,171 @@ internal sealed class BattlefieldView : Control
         {
             if (unit.X < firstX - 1 || unit.X > lastX + 1 || unit.Y < firstY - 1 || unit.Y > lastY + 1)
                 continue;
-            RectangleF cb = CellBounds(bounds, unit.X, unit.Y);
+            PointF center = UnitScreenCenter(bounds, unit);
             int w = Math.Clamp((int)(cellSize * 0.72f), 32, 54);
             int h = Math.Clamp((int)(cellSize * 0.62f), 29, 48);
-            var counterBounds = new Rectangle((int)(cb.X + (cb.Width - w) / 2),
-                (int)(cb.Y + (cb.Height - h) / 2), w, h);
+            var counterBounds = new Rectangle((int)(center.X - w / 2f),
+                (int)(center.Y - h / 2f), w, h);
             DrawCounter(g, counterBounds, unit, ReferenceEquals(unit, selectedUnit));
+            UnitMovementExecution? execution = movementExecution?.ForUnit(unit);
+            if (execution?.WaitingForTraffic == true)
+                DrawTrafficHoldMarker(g, counterBounds);
         }
 
         if (selectedCell is Point selected)
         {
             RectangleF cb = CellBounds(bounds, selected.X, selected.Y);
-            using var selection = new Pen(Color.FromArgb(240, 210, 42), 3);
+            Color selectionColor = plottingOrder is { IsReachable: false }
+                ? Color.FromArgb(224, 66, 54)
+                : Color.FromArgb(240, 210, 42);
+            using var selection = new Pen(selectionColor, 3);
             using GraphicsPath selectedHex = HexPath(RectangleF.Inflate(cb, -2, -2));
             g.DrawPath(selection, selectedHex);
         }
 
         g.Clip = oldClip;
+    }
+
+    private void DrawTrafficHoldMarker(Graphics g, Rectangle counterBounds)
+    {
+        var marker = new Rectangle(counterBounds.Right - 5, counterBounds.Top - 9, 20, 20);
+        using var fill = new SolidBrush(Color.FromArgb(235, 218, 151, 32));
+        using var outline = new Pen(Color.FromArgb(245, 250, 239, 203), 2);
+        using var label = new SolidBrush(Color.FromArgb(25, 25, 20));
+        using var markerFont = new Font("Segoe UI", 10, FontStyle.Bold);
+        g.FillEllipse(fill, marker);
+        g.DrawEllipse(outline, marker);
+        g.DrawString("!", markerFont, label, marker.X + 6, marker.Y - 1);
+    }
+
+    private void DrawOrderRoute(Graphics g, Rectangle bounds, PlannedMoveOrder order, bool plotting)
+    {
+        if (order.Route.Count < 2) return;
+        PointF[] points = RouteDisplayPoints(bounds, order.Route);
+        bool nato = order.Unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase);
+        Color routeColor = !order.IsReachable
+            ? Color.FromArgb(224, 66, 54)
+            : plotting
+                ? Color.FromArgb(242, 211, 54)
+                : nato
+                    ? Color.FromArgb(210, 115, 205, 225)
+                    : Color.FromArgb(220, 238, 117, 104);
+        using var shadow = new Pen(Color.FromArgb(185, 5, 22, 28), 7)
+        {
+            LineJoin = LineJoin.Round,
+            StartCap = LineCap.Round,
+            EndCap = LineCap.ArrowAnchor
+        };
+        using var route = new Pen(routeColor, plotting ? 3.5f : 2.5f)
+        {
+            LineJoin = LineJoin.Round,
+            StartCap = LineCap.Round,
+            EndCap = LineCap.ArrowAnchor,
+            DashStyle = plotting ? DashStyle.Solid : DashStyle.Dash
+        };
+        g.DrawLines(shadow, points);
+        g.DrawLines(route, points);
+
+        using var waypointFill = new SolidBrush(Color.FromArgb(230, 8, 31, 44));
+        using var waypointBorder = new Pen(routeColor, 2);
+        using var waypointText = new SolidBrush(Color.White);
+        for (int i = 0; i < order.Waypoints.Count; i++)
+        {
+            int routeIndex = order.Route.LastIndexOf(order.Waypoints[i]);
+            PointF center = routeIndex >= 0 ? points[routeIndex] :
+                CellCenter(bounds, order.Waypoints[i]);
+            float radius = Math.Clamp(cellSize * 0.14f, 7, 11);
+            g.FillEllipse(waypointFill, center.X - radius, center.Y - radius,
+                radius * 2, radius * 2);
+            g.DrawEllipse(waypointBorder, center.X - radius, center.Y - radius,
+                radius * 2, radius * 2);
+            string label = (i + 1).ToString();
+            SizeF labelSize = g.MeasureString(label, counterFont);
+            g.DrawString(label, counterFont, waypointText,
+                center.X - labelSize.Width / 2, center.Y - labelSize.Height / 2);
+        }
+    }
+
+    private PointF[] RouteDisplayPoints(Rectangle bounds, IReadOnlyList<Point> cells)
+    {
+        var points = new PointF[cells.Count];
+        for (int index = 0; index < cells.Count; index++)
+        {
+            int roadClass = 0;
+            if (index + 1 < cells.Count && data.Edges.TryGetValue(
+                    HexEdgeKey.Create(cells[index], cells[index + 1]), out MapEdge? outgoing))
+                roadClass = outgoing.RoadClass;
+            if (roadClass == 0 && index > 0 && data.Edges.TryGetValue(
+                    HexEdgeKey.Create(cells[index - 1], cells[index]), out MapEdge? incoming))
+                roadClass = incoming.RoadClass;
+
+            points[index] = roadClass > 0
+                ? GeographicToScreen(bounds, NearestRoadPoint(cells[index], roadClass))
+                : CellCenter(bounds, cells[index]);
+        }
+        return points;
+    }
+
+    private MapVertex NearestRoadPoint(Point cell, int roadClass)
+    {
+        if (roadSnapCache.TryGetValue((cell.X, cell.Y, roadClass), out MapVertex? cached) &&
+            cached is not null)
+            return cached;
+
+        double mapWorldWidth = (data.MapWidth - 1) * 0.75 + 1.0;
+        double mapWorldHeight = data.MapHeight + 0.5;
+        double cellEasting = data.OriginEasting +
+            (cell.X * 0.75 + 0.5) / mapWorldWidth * data.ExtentWidthMeters;
+        double cellNorthing = data.OriginNorthing + data.ExtentHeightMeters -
+            (cell.Y + ((cell.X & 1) == 1 ? 0.5 : 0.0) + 0.5) /
+            mapWorldHeight * data.ExtentHeightMeters;
+
+        MapVertex nearest = new(cellEasting, cellNorthing);
+        double nearestDistanceSquared = double.MaxValue;
+        foreach (MapFeaturePath road in data.Features.Where(feature =>
+                     feature.Type.Equals("road", StringComparison.OrdinalIgnoreCase) &&
+                     feature.FeatureClass == roadClass))
+        {
+            for (int index = 1; index < road.Vertices.Count; index++)
+            {
+                MapVertex candidate = ProjectToSegment(
+                    cellEasting, cellNorthing, road.Vertices[index - 1], road.Vertices[index]);
+                double dx = candidate.Easting - cellEasting;
+                double dy = candidate.Northing - cellNorthing;
+                double distanceSquared = dx * dx + dy * dy;
+                if (distanceSquared >= nearestDistanceSquared) continue;
+                nearest = candidate;
+                nearestDistanceSquared = distanceSquared;
+            }
+        }
+
+        roadSnapCache[(cell.X, cell.Y, roadClass)] = nearest;
+        return nearest;
+    }
+
+    private static MapVertex ProjectToSegment(
+        double x, double y, MapVertex start, MapVertex end)
+    {
+        double dx = end.Easting - start.Easting;
+        double dy = end.Northing - start.Northing;
+        double lengthSquared = dx * dx + dy * dy;
+        if (lengthSquared < 0.000001) return start;
+        double fraction = Math.Clamp(
+            ((x - start.Easting) * dx + (y - start.Northing) * dy) / lengthSquared, 0, 1);
+        return new MapVertex(start.Easting + fraction * dx, start.Northing + fraction * dy);
+    }
+
+    private PointF GeographicToScreen(Rectangle bounds, MapVertex vertex)
+    {
+        float worldWidth = (data.MapWidth - 1) * HexColumnStep + cellSize;
+        float worldHeight = (data.MapHeight + 0.5f) * HexHeight;
+        float worldX = (float)((vertex.Easting - data.OriginEasting) /
+            data.ExtentWidthMeters * worldWidth);
+        float worldY = (float)((data.OriginNorthing + data.ExtentHeightMeters -
+            vertex.Northing) / data.ExtentHeightMeters * worldHeight);
+        return new PointF(
+            bounds.Left + worldX - cameraX * HexColumnStep,
+            bounds.Top + worldY - cameraY * HexHeight);
     }
 
     private void DrawTerrainChunks(Graphics g, Rectangle bounds)
@@ -808,19 +1386,69 @@ internal sealed class BattlefieldView : Control
         g.FillRectangle(background, bounds);
         g.DrawLine(line, bounds.Left, bounds.Top, bounds.Right, bounds.Top);
 
-        string[] commands = ["SELECT", "MOVE", "FIRE", "ASSAULT", "INFO"];
+        string[] commands = FooterCommands();
         int x = 20;
         foreach (string command in commands)
         {
-            Rectangle button = new(x, bounds.Top + 10, 105, 40);
+            Rectangle button = FooterButtonBounds(bounds, x);
             g.DrawRectangle(line, button);
-            g.DrawString(command, bodyBoldFont, command == "SELECT" ? active : text, x + 17, bounds.Top + 19);
+            bool highlighted = command is "SELECT" or "CONFIRM" or "EXECUTE" or
+                "NEXT TURN" or "RESUME";
+            g.DrawString(command, bodyBoldFont, highlighted ? active : text,
+                x + 17, bounds.Top + 19);
             x += 116;
         }
 
-        string help = "WASD / ARROWS  CURSOR     ENTER  SELECT     EDGE / DRAG  PAN     WHEEL  ZOOM";
+        string help = turnPhase switch
+        {
+            TurnPhase.Executing => "SIMULTANEOUS MOVEMENT     SPACE  PAUSE / RESUME     DRAG  PAN",
+            TurnPhase.Review => "REVIEW RESULTS     ENTER / NEXT TURN  RETURN TO PLANNING",
+            _ when plottingOrder is not null =>
+                "CLICK / ENTER  WAYPOINT     DOUBLE-CLICK  CONFIRM     BACKSPACE  UNDO     ESC  CANCEL",
+            _ => "RIGHT-CLICK UNIT  ORDERS     WASD / ARROWS  CURSOR     EDGE / DRAG  PAN"
+        };
         SizeF size = g.MeasureString(help, bodyFont);
         g.DrawString(help, bodyFont, text, bounds.Right - size.Width - 18, bounds.Top + 21);
+
+        string? notice = plottingOrder switch
+        {
+            { IsReachable: false } => plottingOrder.FailureReason ?? "NO LEGAL ROUTE",
+            { IsReachable: true } => $"ROUTE COST {plottingOrder.TotalCost / 10f:0.0}",
+            _ => ExecutionNotice() ?? orderNotice
+        };
+        if (!string.IsNullOrWhiteSpace(notice))
+        {
+            SizeF noticeSize = g.MeasureString(notice, bodyBoldFont);
+            float noticeX = Math.Max(x + 12, bounds.Right - size.Width - noticeSize.Width - 48);
+            using var noticeBrush = new SolidBrush(plottingOrder is { IsReachable: false }
+                ? Color.FromArgb(239, 112, 102)
+                : Color.FromArgb(218, 191, 55));
+            g.DrawString(notice, bodyBoldFont, noticeBrush, noticeX, bounds.Top + 21);
+        }
+    }
+
+    private static Rectangle FooterButtonBounds(Rectangle footer, int x) =>
+        new(x, footer.Top + 10, 105, 40);
+
+    private string[] FooterCommands() => turnPhase switch
+    {
+        TurnPhase.Executing => [executionPaused ? "RESUME" : "PAUSE"],
+        TurnPhase.Review => ["NEXT TURN"],
+        _ when plottingOrder is not null => ["CONFIRM", "UNDO", "CANCEL"],
+        _ => ["SELECT", "MOVE", "FIRE", "ASSAULT", "EXECUTE"]
+    };
+
+    private string? ExecutionNotice()
+    {
+        if (turnPhase != TurnPhase.Executing || movementExecution is null) return null;
+        int percent = (int)Math.Round(
+            movementExecution.ElapsedGameSeconds / movementExecution.TurnDurationSeconds * 100);
+        string state = executionPaused ? "PAUSED" : "RESOLVING";
+        int natoMoving = movementExecution.Units.Count(unit => !unit.RouteComplete &&
+            unit.Order.Unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase));
+        int pactMoving = movementExecution.Units.Count(unit => !unit.RouteComplete &&
+            !unit.Order.Unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase));
+        return $"{state} {percent}% — NATO {natoMoving} / PACT {pactMoving} MOVING";
     }
 
     private void DrawMiniMap(Graphics g, Rectangle mapBounds)
@@ -845,8 +1473,9 @@ internal sealed class BattlefieldView : Control
         foreach (ScenarioUnit unit in data.Units)
         {
             bool nato = unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase);
-            float markerX = inner.X + unit.X * 0.75f * sx;
-            float markerY = inner.Y + (unit.Y + ((unit.X & 1) == 1 ? 0.5f : 0f)) * sy;
+            PointF mapPosition = UnitMiniMapPosition(unit);
+            float markerX = inner.X + mapPosition.X * sx;
+            float markerY = inner.Y + mapPosition.Y * sy;
             RectangleF marker = new(markerX - 3.5f, markerY - 3.5f, 8, 8);
             using var halo = new Pen(Color.FromArgb(235, 239, 235), 1.5f);
             using var dot = new SolidBrush(nato
@@ -950,6 +1579,16 @@ internal sealed class BattlefieldView : Control
             ClampCamera();
             Invalidate();
         }
+        else if (plottingOrder is not null && MapBounds().Contains(e.Location))
+        {
+            Point? hover = HitCell(e.Location);
+            if (hover is Point cell && selectedCell != cell)
+            {
+                selectedCell = cell;
+                RebuildRoute(plottingOrder);
+                Invalidate();
+            }
+        }
         base.OnMouseMove(e);
     }
 
@@ -966,11 +1605,81 @@ internal sealed class BattlefieldView : Control
             dragging = false;
             Cursor = Cursors.Default;
             Capture = false;
-            if (dragButton == MouseButtons.Left && !dragMoved)
-                SelectAt(e.Location);
+            if (!dragMoved)
+            {
+                if (dragButton == MouseButtons.Left)
+                {
+                    if (plottingOrder is not null)
+                    {
+                        Point? cell = HitCell(e.Location);
+                        if (cell is Point waypoint) AddWaypoint(waypoint);
+                    }
+                    else SelectAt(e.Location);
+                }
+                else if (dragButton == MouseButtons.Right)
+                {
+                    if (plottingOrder is not null)
+                    {
+                        CancelPlotting();
+                    }
+                    else
+                    {
+                        SelectAt(e.Location);
+                        if (selectedUnit is not null) ShowUnitActionMenu(e.Location);
+                    }
+                }
+            }
+            return;
+        }
+        if (e.Button == MouseButtons.Left && FooterBounds().Contains(e.Location))
+        {
+            HandleFooterClick(e.Location);
             return;
         }
         base.OnMouseUp(e);
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left && plottingOrder is not null && MapBounds().Contains(e.Location))
+            ConfirmPlotting();
+        base.OnMouseDoubleClick(e);
+    }
+
+    private void HandleFooterClick(Point point)
+    {
+        Rectangle footer = FooterBounds();
+        int index = (point.X - 20) / 116;
+        string[] commands = FooterCommands();
+        if (point.X < 20 || index < 0 || index >= commands.Length ||
+            !FooterButtonBounds(footer, 20 + index * 116).Contains(point))
+            return;
+
+        if (turnPhase == TurnPhase.Executing)
+        {
+            if (index == 0) ToggleExecutionPause();
+            return;
+        }
+        if (turnPhase == TurnPhase.Review)
+        {
+            if (index == 0) BeginNextTurn();
+            return;
+        }
+
+        if (plottingOrder is not null)
+        {
+            if (index == 0) ConfirmPlotting();
+            else if (index == 1) UndoWaypoint();
+            else if (index == 2) CancelPlotting();
+            return;
+        }
+
+        if (index == 1 && selectedUnit is not null)
+            BeginMoveOrder(OrderPosture.Tactical);
+        else if (index is 2 or 3)
+            ShowDeferredAction(index == 2 ? "FIRE — W2.4" : "ASSAULT — W2.4");
+        else if (index == 4)
+            BeginExecution();
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
@@ -981,26 +1690,30 @@ internal sealed class BattlefieldView : Control
 
     private void SelectAt(Point point)
     {
-        Rectangle map = MapBounds();
-        if (!map.Contains(point)) return;
-        Point? hit = null;
-        for (int y = 0; y < data.MapHeight && hit is null; y++)
-        for (int x = 0; x < data.MapWidth; x++)
-        {
-            RectangleF bounds = CellBounds(map, x, y);
-            if (!bounds.Contains(point)) continue;
-            using GraphicsPath hex = HexPath(bounds);
-            if (hex.IsVisible(point))
-            {
-                hit = new Point(x, y);
-                break;
-            }
-        }
+        Point? hit = HitCell(point);
         if (hit is not Point cell) return;
 
         selectedCell = cell;
         selectedUnit = data.Units.LastOrDefault(unit => unit.X == cell.X && unit.Y == cell.Y);
         Invalidate();
+    }
+
+    private Point? HitCell(Point point)
+    {
+        Rectangle map = MapBounds();
+        if (!map.Contains(point)) return null;
+        int approximateX = (int)Math.Round(cameraX + (point.X - map.X - cellSize / 2) / HexColumnStep);
+        int approximateY = (int)Math.Round(cameraY + (point.Y - map.Y) / HexHeight -
+            (((approximateX & 1) == 1 ? 0.5f : 0f)));
+        for (int y = approximateY - 2; y <= approximateY + 2; y++)
+        for (int x = approximateX - 2; x <= approximateX + 2; x++)
+        {
+            if (x < 0 || x >= data.MapWidth || y < 0 || y >= data.MapHeight) continue;
+            RectangleF bounds = CellBounds(map, x, y);
+            using GraphicsPath hex = HexPath(bounds);
+            if (hex.IsVisible(point)) return new Point(x, y);
+        }
+        return null;
     }
 
     private void ZoomAt(Point point, float factor)
@@ -1020,6 +1733,42 @@ internal sealed class BattlefieldView : Control
         mapBounds.Y + (y - cameraY + ((x & 1) == 1 ? 0.5f : 0f)) * HexHeight,
         cellSize,
         HexHeight);
+
+    private PointF CellCenter(Rectangle mapBounds, Point cell)
+    {
+        RectangleF bounds = CellBounds(mapBounds, cell.X, cell.Y);
+        return new PointF(bounds.X + bounds.Width / 2, bounds.Y + bounds.Height / 2);
+    }
+
+    private PointF UnitScreenCenter(Rectangle mapBounds, ScenarioUnit unit)
+    {
+        UnitMovementExecution? execution = movementExecution?.ForUnit(unit);
+        if (execution is null || execution.RouteComplete)
+            return CellCenter(mapBounds, new Point(unit.X, unit.Y));
+
+        PointF from = CellCenter(mapBounds, execution.Current);
+        PointF to = CellCenter(mapBounds, execution.Next);
+        float progress = execution.VisualProgress;
+        return new PointF(
+            from.X + (to.X - from.X) * progress,
+            from.Y + (to.Y - from.Y) * progress);
+    }
+
+    private PointF UnitMiniMapPosition(ScenarioUnit unit)
+    {
+        UnitMovementExecution? execution = movementExecution?.ForUnit(unit);
+        if (execution is null || execution.RouteComplete)
+            return new PointF(unit.X * 0.75f,
+                unit.Y + ((unit.X & 1) == 1 ? 0.5f : 0f));
+        float progress = execution.VisualProgress;
+        float fromX = execution.Current.X * 0.75f;
+        float fromY = execution.Current.Y + ((execution.Current.X & 1) == 1 ? 0.5f : 0f);
+        float toX = execution.Next.X * 0.75f;
+        float toY = execution.Next.Y + ((execution.Next.X & 1) == 1 ? 0.5f : 0f);
+        return new PointF(
+            fromX + (toX - fromX) * progress,
+            fromY + (toY - fromY) * progress);
+    }
 
     private RectangleF WorldCellBounds(int x, int y) => new(
         x * HexColumnStep,
@@ -1051,6 +1800,8 @@ internal sealed class BattlefieldView : Control
         HeaderHeight,
         Math.Max(1, Width - InspectorWidth),
         Math.Max(1, Height - HeaderHeight - FooterHeight));
+
+    private Rectangle FooterBounds() => new(0, Height - FooterHeight, Width, FooterHeight);
 
     private static Rectangle MiniMapBounds(Rectangle mapBounds) => new(
         mapBounds.Right - MiniMapWidth - 16,
@@ -1102,6 +1853,8 @@ internal sealed class BattlefieldView : Control
         if (disposing)
         {
             edgeScrollTimer.Dispose();
+            executionTimer.Dispose();
+            unitActionMenu.Dispose();
             titleFont.Dispose();
             menuFont.Dispose();
             headingFont.Dispose();
@@ -1115,4 +1868,34 @@ internal sealed class BattlefieldView : Control
         }
         base.Dispose(disposing);
     }
+}
+
+internal enum TurnPhase
+{
+    Planning,
+    Executing,
+    Review
+}
+
+internal sealed class TacticalMenuRenderer : ToolStripProfessionalRenderer
+{
+    public TacticalMenuRenderer() : base(new TacticalColorTable()) { }
+
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+    {
+        e.TextColor = e.Item.Enabled
+            ? Color.FromArgb(226, 235, 226)
+            : Color.FromArgb(101, 128, 135);
+        base.OnRenderItemText(e);
+    }
+}
+
+internal sealed class TacticalColorTable : ProfessionalColorTable
+{
+    public override Color ToolStripDropDownBackground => Color.FromArgb(10, 38, 48);
+    public override Color MenuItemSelected => Color.FromArgb(32, 78, 84);
+    public override Color MenuItemBorder => Color.FromArgb(222, 192, 53);
+    public override Color MenuBorder => Color.FromArgb(116, 157, 178);
+    public override Color SeparatorDark => Color.FromArgb(63, 100, 111);
+    public override Color SeparatorLight => Color.FromArgb(63, 100, 111);
 }

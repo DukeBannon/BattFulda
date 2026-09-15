@@ -1,5 +1,5 @@
 INSERT INTO schema_info(version, created_utc)
-VALUES (6, '2026-09-12T00:00:00Z');
+VALUES (8, '2026-09-14T00:00:00Z');
 
 INSERT INTO faction(faction_id, faction_key, display_name) VALUES
     (0, 'NATO', 'NATO'),
@@ -52,6 +52,116 @@ INSERT INTO terrain_type(
     (4, 'water', 'Water', 0, 0),
     (5, 'urban', 'Urban', 7, 7),
     (6, 'cultivated', 'Cultivated', 1, 2);
+
+INSERT INTO terrain_movement_cost(
+    mobility_id, terrain_id, passable, quick_cost, tactical_cost, hunt_cost
+)
+SELECT m.mobility_id, t.terrain_id,
+       CASE WHEN t.terrain_key = 'water' OR
+                      (m.mobility_key IN ('wheeled', 'towed') AND t.terrain_key = 'marsh')
+            THEN 0 ELSE 1 END,
+       CASE
+           WHEN t.terrain_key = 'water' OR
+                (m.mobility_key IN ('wheeled', 'towed') AND t.terrain_key = 'marsh') THEN NULL
+           WHEN m.mobility_key = 'tracked' THEN
+                CASE t.terrain_key WHEN 'clear' THEN 8 WHEN 'cultivated' THEN 10
+                     WHEN 'woods' THEN 22 WHEN 'rough' THEN 18 WHEN 'marsh' THEN 34
+                     WHEN 'urban' THEN 16 ELSE 12 END
+           WHEN m.mobility_key = 'wheeled' THEN
+                CASE t.terrain_key WHEN 'clear' THEN 10 WHEN 'cultivated' THEN 14
+                     WHEN 'woods' THEN 32 WHEN 'rough' THEN 28 WHEN 'urban' THEN 18 ELSE 16 END
+           WHEN m.mobility_key = 'foot' THEN
+                CASE t.terrain_key WHEN 'clear' THEN 16 WHEN 'cultivated' THEN 17
+                     WHEN 'woods' THEN 20 WHEN 'rough' THEN 20 WHEN 'marsh' THEN 27
+                     WHEN 'urban' THEN 18 ELSE 20 END
+           WHEN m.mobility_key = 'towed' THEN
+                CASE t.terrain_key WHEN 'clear' THEN 12 WHEN 'cultivated' THEN 17
+                     WHEN 'woods' THEN 36 WHEN 'rough' THEN 32 WHEN 'urban' THEN 22 ELSE 20 END
+           ELSE
+                CASE t.terrain_key WHEN 'clear' THEN 11 WHEN 'cultivated' THEN 15
+                     WHEN 'woods' THEN 30 WHEN 'rough' THEN 27 WHEN 'marsh' THEN 38
+                     WHEN 'urban' THEN 20 ELSE 18 END
+       END,
+       CASE
+           WHEN t.terrain_key = 'water' OR
+                (m.mobility_key IN ('wheeled', 'towed') AND t.terrain_key = 'marsh') THEN NULL
+           WHEN m.mobility_key = 'tracked' THEN
+                CASE t.terrain_key WHEN 'clear' THEN 10 WHEN 'cultivated' THEN 12
+                     WHEN 'woods' THEN 24 WHEN 'rough' THEN 20 WHEN 'marsh' THEN 38
+                     WHEN 'urban' THEN 18 ELSE 14 END
+           WHEN m.mobility_key = 'wheeled' THEN
+                CASE t.terrain_key WHEN 'clear' THEN 12 WHEN 'cultivated' THEN 16
+                     WHEN 'woods' THEN 35 WHEN 'rough' THEN 30 WHEN 'urban' THEN 20 ELSE 18 END
+           WHEN m.mobility_key = 'foot' THEN
+                CASE t.terrain_key WHEN 'clear' THEN 18 WHEN 'cultivated' THEN 19
+                     WHEN 'woods' THEN 21 WHEN 'rough' THEN 22 WHEN 'marsh' THEN 30
+                     WHEN 'urban' THEN 19 ELSE 22 END
+           WHEN m.mobility_key = 'towed' THEN
+                CASE t.terrain_key WHEN 'clear' THEN 14 WHEN 'cultivated' THEN 19
+                     WHEN 'woods' THEN 40 WHEN 'rough' THEN 35 WHEN 'urban' THEN 24 ELSE 22 END
+           ELSE
+                CASE t.terrain_key WHEN 'clear' THEN 13 WHEN 'cultivated' THEN 17
+                     WHEN 'woods' THEN 33 WHEN 'rough' THEN 30 WHEN 'marsh' THEN 42
+                     WHEN 'urban' THEN 22 ELSE 20 END
+       END,
+       CASE
+           WHEN t.terrain_key = 'water' OR
+                (m.mobility_key IN ('wheeled', 'towed') AND t.terrain_key = 'marsh') THEN NULL
+           WHEN m.mobility_key = 'tracked' THEN
+                CASE t.terrain_key WHEN 'clear' THEN 15 WHEN 'cultivated' THEN 16
+                     WHEN 'woods' THEN 19 WHEN 'rough' THEN 23 WHEN 'marsh' THEN 43
+                     WHEN 'urban' THEN 20 ELSE 18 END
+           WHEN m.mobility_key = 'wheeled' THEN
+                CASE t.terrain_key WHEN 'clear' THEN 17 WHEN 'cultivated' THEN 20
+                     WHEN 'woods' THEN 27 WHEN 'rough' THEN 34 WHEN 'urban' THEN 22 ELSE 22 END
+           WHEN m.mobility_key = 'foot' THEN
+                CASE t.terrain_key WHEN 'clear' THEN 22 WHEN 'cultivated' THEN 22
+                     WHEN 'woods' THEN 19 WHEN 'rough' THEN 24 WHEN 'marsh' THEN 34
+                     WHEN 'urban' THEN 20 ELSE 25 END
+           WHEN m.mobility_key = 'towed' THEN
+                CASE t.terrain_key WHEN 'clear' THEN 20 WHEN 'cultivated' THEN 23
+                     WHEN 'woods' THEN 34 WHEN 'rough' THEN 39 WHEN 'urban' THEN 27 ELSE 27 END
+           ELSE
+                CASE t.terrain_key WHEN 'clear' THEN 18 WHEN 'cultivated' THEN 21
+                     WHEN 'woods' THEN 27 WHEN 'rough' THEN 34 WHEN 'marsh' THEN 47
+                     WHEN 'urban' THEN 24 ELSE 24 END
+       END
+FROM mobility_class m CROSS JOIN terrain_type t;
+
+INSERT INTO road_movement_cost(
+    mobility_id, road_class, quick_cost, tactical_cost, hunt_cost
+)
+SELECT mobility_id, road_class,
+       CASE mobility_key WHEN 'foot' THEN 14 ELSE
+            CASE road_class WHEN 3 THEN 4 WHEN 2 THEN 5 ELSE 7 END END,
+       CASE mobility_key WHEN 'foot' THEN 16 ELSE
+            CASE road_class WHEN 3 THEN 6 WHEN 2 THEN 7 ELSE 9 END END,
+       CASE mobility_key WHEN 'foot' THEN 19 ELSE
+            CASE road_class WHEN 3 THEN 9 WHEN 2 THEN 10 ELSE 12 END END
+FROM mobility_class CROSS JOIN (SELECT 1 road_class UNION ALL SELECT 2 UNION ALL SELECT 3);
+
+INSERT INTO water_crossing_cost(
+    mobility_id, river_class, crossing_type, requires_amphibious,
+    quick_cost, tactical_cost, hunt_cost
+)
+SELECT mobility_id, river_class, crossing_type,
+       CASE WHEN crossing_type = 'none' AND river_class >= 2 THEN 1 ELSE 0 END,
+       CASE crossing_type WHEN 'bridge' THEN 2 WHEN 'ford' THEN 10
+            ELSE CASE river_class WHEN 1 THEN 6 WHEN 2 THEN 30 ELSE 42 END END,
+       CASE crossing_type WHEN 'bridge' THEN 3 WHEN 'ford' THEN 12
+            ELSE CASE river_class WHEN 1 THEN 8 WHEN 2 THEN 34 ELSE 48 END END,
+       CASE crossing_type WHEN 'bridge' THEN 4 WHEN 'ford' THEN 15
+            ELSE CASE river_class WHEN 1 THEN 10 WHEN 2 THEN 38 ELSE 54 END END
+FROM mobility_class
+CROSS JOIN (SELECT 1 river_class UNION ALL SELECT 2 UNION ALL SELECT 3)
+CROSS JOIN (SELECT 'none' crossing_type UNION ALL SELECT 'bridge' UNION ALL SELECT 'ford');
+
+INSERT INTO movement_parameter(parameter_key, value_integer, notes) VALUES
+    ('elevation_step_m', 25, 'Elevation interval used to calculate movement penalties.'),
+    ('uphill_cost_per_step', 2, 'Additional cost per elevation step when climbing.'),
+    ('downhill_cost_per_step', 1, 'Additional cost per elevation step when descending.'),
+    ('road_access_penalty', 8, 'Cost for entering, leaving, or cutting across a road hex without following its connected road edge.'),
+    ('minimum_step_cost', 4, 'Lower bound used by the A-star heuristic.');
 
 INSERT INTO formation_kind(formation_kind_id, formation_kind_key, display_name) VALUES
     (0, 'regiment', 'Regiment'),

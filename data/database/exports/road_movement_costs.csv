@@ -1,0 +1,16 @@
+mobility_key,road_class,quick_cost,tactical_cost,hunt_cost
+tracked,1,7,9,12
+tracked,2,5,7,10
+tracked,3,4,6,9
+wheeled,1,7,9,12
+wheeled,2,5,7,10
+wheeled,3,4,6,9
+foot,1,14,16,19
+foot,2,14,16,19
+foot,3,14,16,19
+towed,1,7,9,12
+towed,2,5,7,10
+towed,3,4,6,9
+mixed,1,7,9,12
+mixed,2,5,7,10
+mixed,3,4,6,9

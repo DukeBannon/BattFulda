@@ -22,8 +22,9 @@ UNIT_TYPES_PATH = ROOT / "data" / "units" / "unit_types.csv"
 MAP_CELLS_PATH = ROOT / "data" / "maps" / "point_alpha_cells.csv"
 MAP_EDGES_PATH = ROOT / "data" / "maps" / "point_alpha_edges.csv"
 MAP_FEATURES_PATH = ROOT / "data" / "maps" / "point_alpha_features.csv"
+MAP_CROSSINGS_PATH = ROOT / "data" / "maps" / "point_alpha_crossings.csv"
 EXPORT_DIRECTORY = DATABASE_DIRECTORY / "exports"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 DEFAULT_SCENARIO = "a2_command_post"
 DEFAULT_PRODUCTION_MAP = "point_alpha_corridor"
 
@@ -296,6 +297,39 @@ def import_map_features(connection: sqlite3.Connection, path: Path = MAP_FEATURE
     return len(seen)
 
 
+def import_map_crossings(connection: sqlite3.Connection, path: Path = MAP_CROSSINGS_PATH) -> int:
+    expected_fields = {
+        "map_key", "x", "y", "neighbor_x", "neighbor_y", "river_class",
+        "crossing_type", "source_status",
+    }
+    map_ids = lookup(connection, "map", "map_id", "map_key")
+    try:
+        source = path.open("r", encoding="utf-8", newline="")
+    except OSError as error:
+        raise DataError(f"Cannot read {path.relative_to(ROOT)}: {error}") from error
+    with source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames is None or set(reader.fieldnames) != expected_fields:
+            raise DataError("point_alpha_crossings.csv columns do not match the crossing-edge schema")
+        records = list(reader)
+    for record in records:
+        try:
+            connection.execute("""
+                INSERT INTO map_crossing_edge(
+                    map_id, x, y, neighbor_x, neighbor_y, river_class,
+                    crossing_type, source_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                map_ids[record["map_key"]], int(record["x"]), int(record["y"]),
+                int(record["neighbor_x"]), int(record["neighbor_y"]),
+                int(record["river_class"]), record["crossing_type"],
+                record["source_status"],
+            ))
+        except (KeyError, ValueError, sqlite3.IntegrityError) as error:
+            raise DataError(f"Invalid movement crossing record: {record}: {error}") from error
+    return len(records)
+
+
 def initialize_database(path: Path = DATABASE_PATH, force: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and not force:
@@ -312,6 +346,7 @@ def initialize_database(path: Path = DATABASE_PATH, force: bool = False) -> None
             import_map_cells(connection)
             import_map_edges(connection)
             import_map_features(connection)
+            import_map_crossings(connection)
             connection.executescript(read_sql(SCENARIO_SEED_PATH))
             connection.commit()
         finally:
@@ -349,6 +384,18 @@ def validate_database(path: Path = DATABASE_PATH) -> dict[str, int]:
         map_cell_count = scalar(connection, "SELECT COUNT(*) FROM map_cell")
         map_edge_count = scalar(connection, "SELECT COUNT(*) FROM map_edge")
         map_feature_count = scalar(connection, "SELECT COUNT(*) FROM map_feature")
+        map_crossing_count = scalar(connection, "SELECT COUNT(*) FROM map_crossing_edge")
+        terrain_cost_count = scalar(connection, "SELECT COUNT(*) FROM terrain_movement_cost")
+        road_cost_count = scalar(connection, "SELECT COUNT(*) FROM road_movement_cost")
+        crossing_cost_count = scalar(connection, "SELECT COUNT(*) FROM water_crossing_cost")
+        mobility_count = scalar(connection, "SELECT COUNT(*) FROM mobility_class")
+        terrain_type_count = scalar(connection, "SELECT COUNT(*) FROM terrain_type")
+        if terrain_cost_count != mobility_count * terrain_type_count:
+            raise DataError("Movement data does not cover every mobility and terrain combination")
+        if road_cost_count != mobility_count * 3:
+            raise DataError("Movement data does not cover every mobility and road class")
+        if crossing_cost_count != mobility_count * 9:
+            raise DataError("Movement data does not cover every mobility and water crossing")
         if not unit_type_count or not scenario_count:
             raise DataError("Database requires unit types and at least one scenario")
         runtime_ids = [row[0] for row in connection.execute(
@@ -459,6 +506,10 @@ def validate_database(path: Path = DATABASE_PATH) -> dict[str, int]:
         "map_cells": map_cell_count,
         "map_edges": map_edge_count,
         "map_features": map_feature_count,
+        "map_crossings": map_crossing_count,
+        "terrain_costs": terrain_cost_count,
+        "road_costs": road_cost_count,
+        "crossing_costs": crossing_cost_count,
     }
 
 
@@ -479,7 +530,8 @@ def export_database(path: Path = DATABASE_PATH, output: Path = EXPORT_DIRECTORY)
         write_query_csv(connection, output / "unit_types.csv", "SELECT * FROM v_unit_type ORDER BY unit_type_id")
         write_query_csv(connection, output / "scenarios.csv", """
             SELECT s.scenario_id, s.scenario_key, s.display_name, m.map_key,
-                   s.scenario_year, s.turn_minutes, s.cursor_x, s.cursor_y, s.notes
+                   s.scenario_year, s.start_datetime, s.turn_minutes,
+                   s.cursor_x, s.cursor_y, s.notes
             FROM scenario s JOIN map m ON m.map_id = s.map_id
             ORDER BY s.scenario_id
         """)
@@ -503,7 +555,7 @@ def export_database(path: Path = DATABASE_PATH, output: Path = EXPORT_DIRECTORY)
             SELECT scenario_key, scenario_unit_id, unit_key, unit_name,
                    formation_name, parent_formation, type_key, unit_type,
                    faction, country, x, y, strength, morale, suppression, readiness
-                   , amphibious
+                   , amphibious, mobility, move_points
             FROM v_scenario_order_of_battle
             ORDER BY scenario_key, scenario_unit_id
         """)
@@ -521,6 +573,30 @@ def export_database(path: Path = DATABASE_PATH, output: Path = EXPORT_DIRECTORY)
         """)
         write_query_csv(connection, output / "terrain_types.csv",
                         "SELECT * FROM terrain_type ORDER BY terrain_id")
+        write_query_csv(connection, output / "terrain_movement_costs.csv", """
+            SELECT m.mobility_key, t.terrain_key, c.passable,
+                   c.quick_cost, c.tactical_cost, c.hunt_cost
+            FROM terrain_movement_cost c
+            JOIN mobility_class m ON m.mobility_id = c.mobility_id
+            JOIN terrain_type t ON t.terrain_id = c.terrain_id
+            ORDER BY m.mobility_id, t.terrain_id
+        """)
+        write_query_csv(connection, output / "road_movement_costs.csv", """
+            SELECT m.mobility_key, c.road_class, c.quick_cost,
+                   c.tactical_cost, c.hunt_cost
+            FROM road_movement_cost c
+            JOIN mobility_class m ON m.mobility_id = c.mobility_id
+            ORDER BY m.mobility_id, c.road_class
+        """)
+        write_query_csv(connection, output / "water_crossing_costs.csv", """
+            SELECT m.mobility_key, c.river_class, c.crossing_type,
+                   c.requires_amphibious, c.quick_cost, c.tactical_cost, c.hunt_cost
+            FROM water_crossing_cost c
+            JOIN mobility_class m ON m.mobility_id = c.mobility_id
+            ORDER BY m.mobility_id, c.river_class, c.crossing_type
+        """)
+        write_query_csv(connection, output / "movement_parameters.csv",
+                        "SELECT * FROM movement_parameter ORDER BY parameter_key")
         write_query_csv(connection, output / "map_cells.csv", """
             SELECT m.map_key, mc.x, mc.y, tt.terrain_key, mc.elevation_m,
                    mc.road_class, mc.road_links, mc.river_class, mc.river_links,
@@ -535,6 +611,12 @@ def export_database(path: Path = DATABASE_PATH, output: Path = EXPORT_DIRECTORY)
                    me.crossing_type, me.source_status
             FROM map_edge me JOIN map m ON m.map_id = me.map_id
             ORDER BY m.map_id, me.y, me.x, me.direction
+        """)
+        write_query_csv(connection, output / "map_crossings.csv", """
+            SELECT m.map_key, e.x, e.y, e.neighbor_x, e.neighbor_y,
+                   e.river_class, e.crossing_type, e.source_status
+            FROM map_crossing_edge e JOIN map m ON m.map_id = e.map_id
+            ORDER BY m.map_id, e.y, e.x, e.neighbor_y, e.neighbor_x
         """)
         write_query_csv(connection, output / "map_features.csv", """
             SELECT m.map_key, f.feature_id, f.feature_type, f.feature_class,

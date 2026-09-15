@@ -27,6 +27,10 @@ class DatabaseTests(unittest.TestCase):
             "map_cells": 7360,
             "map_edges": 2411,
             "map_features": 459,
+            "map_crossings": 1380,
+            "terrain_costs": 35,
+            "road_costs": 15,
+            "crossing_costs": 45,
         })
         connection = manage_database.connect(self.database)
         try:
@@ -48,6 +52,26 @@ class DatabaseTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(tuple(crossing), (1, 0))
+
+        connection = manage_database.connect(self.database)
+        try:
+            movement = connection.execute("""
+                SELECT
+                    (SELECT tactical_cost FROM terrain_movement_cost c
+                     JOIN mobility_class m ON m.mobility_id = c.mobility_id
+                     JOIN terrain_type t ON t.terrain_id = c.terrain_id
+                     WHERE m.mobility_key = 'tracked' AND t.terrain_key = 'woods'),
+                    (SELECT tactical_cost FROM road_movement_cost c
+                     JOIN mobility_class m ON m.mobility_id = c.mobility_id
+                     WHERE m.mobility_key = 'tracked' AND c.road_class = 2),
+                    (SELECT requires_amphibious FROM water_crossing_cost c
+                     JOIN mobility_class m ON m.mobility_id = c.mobility_id
+                     WHERE m.mobility_key = 'tracked' AND c.river_class = 3
+                       AND c.crossing_type = 'none')
+            """).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(tuple(movement), (24, 7, 1))
 
         connection = manage_database.connect(self.database)
         try:
@@ -135,14 +159,38 @@ class DatabaseTests(unittest.TestCase):
         with self.assertRaisesRegex(manage_database.DataError, "one-way link"):
             manage_database.validate_database(self.database)
 
+    def test_movement_crossings_are_adjacent_and_include_bridges(self) -> None:
+        connection = manage_database.connect(self.database)
+        try:
+            crossings = connection.execute("""
+                SELECT x, y, neighbor_x, neighbor_y, river_class, crossing_type
+                FROM map_crossing_edge WHERE map_id = 1
+            """).fetchall()
+        finally:
+            connection.close()
+
+        self.assertEqual(len(crossings), 1380)
+        self.assertEqual(sum(row[5] == "bridge" for row in crossings), 61)
+        self.assertTrue(any(row[4] == 3 for row in crossings))
+        for x, y, neighbor_x, neighbor_y, _, _ in crossings:
+            parity_up = -1 if x % 2 == 0 else 0
+            parity_down = 0 if x % 2 == 0 else 1
+            neighbors = {
+                (x, y - 1), (x + 1, y + parity_up),
+                (x + 1, y + parity_down), (x, y + 1),
+                (x - 1, y + parity_down), (x - 1, y + parity_up),
+            }
+            self.assertIn((neighbor_x, neighbor_y), neighbors)
+
     def test_runtime_ids_may_repeat_in_different_scenarios(self) -> None:
         connection = manage_database.connect(self.database)
         try:
             connection.execute("""
                 INSERT INTO scenario(
                     scenario_id, scenario_key, display_name, map_id,
-                    scenario_year, turn_minutes, cursor_x, cursor_y
-                ) VALUES (1, 'second_scenario', 'Second Scenario', 0, 1985, 15, 0, 0)
+                    scenario_year, start_datetime, turn_minutes, cursor_x, cursor_y
+                ) VALUES (1, 'second_scenario', 'Second Scenario', 0, 1985,
+                          '1985-06-06T06:00:00', 15, 0, 0)
             """)
             connection.execute("""
                 INSERT INTO formation(
@@ -181,7 +229,12 @@ class DatabaseTests(unittest.TestCase):
             "terrain_types.csv": 7,
             "map_cells.csv": 7360,
             "map_edges.csv": 2411,
+            "map_crossings.csv": 1380,
             "map_features.csv": 7443,
+            "terrain_movement_costs.csv": 35,
+            "road_movement_costs.csv": 15,
+            "water_crossing_costs.csv": 45,
+            "movement_parameters.csv": 4,
         }
         for name, expected in expected_rows.items():
             with (output / name).open(encoding="utf-8", newline="") as source:
