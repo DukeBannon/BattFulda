@@ -654,6 +654,24 @@ def report(counts: dict[str, int]) -> str:
     return ", ".join(f"{value} {name.replace('_', ' ')}" for name, value in counts.items())
 
 
+def sync_researched_ranges(path: Path = DATABASE_PATH) -> None:
+    """Apply documented M1/TOW/T-64 corrections without rebuilding user map data."""
+    keys = {"us_tank_platoon_m1", "us_atgm_team_tow", "su_tank_platoon_t64b"}
+    with UNIT_TYPES_PATH.open(encoding="utf-8", newline="") as source:
+        records = [row for row in csv.DictReader(source) if row["type_id"] in keys]
+    if {row["type_id"] for row in records} != keys or len(records) != len(keys):
+        raise DataError("Researched range records missing or duplicated")
+    with closing(connect(path)) as connection, connection:
+        for row in records:
+            changed = connection.execute(
+                "UPDATE unit_type SET range_cells=?, equipment=?, notes=?, source_url=? WHERE type_key=?",
+                (integer(row, "range_cells", 0, 255), row["equipment"], row["notes"],
+                 row["source_url"], row["type_id"]),
+            ).rowcount
+            if changed != 1:
+                raise DataError(f"Missing unit type: {row['type_id']}")
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -661,6 +679,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     init_parser.add_argument("--force", action="store_true", help="replace an existing database")
     subparsers.add_parser("validate", help="validate relationships and runtime limits")
     subparsers.add_parser("export", help="write deterministic CSV snapshots")
+    subparsers.add_parser("sync-ranges", help="apply researched range corrections without rebuilding map data")
     save_map_parser = subparsers.add_parser(
         "save-map", help="save SQLiteStudio map edits to the reproducible map CSV"
     )
@@ -674,6 +693,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             counts = validate_database()
             export_database()
             print(f"Created {DATABASE_PATH.relative_to(ROOT)}: {report(counts)}")
+        elif args.command == "sync-ranges":
+            sync_researched_ranges()
+            counts = validate_database()
+            export_database()
+            print(f"Applied researched ranges: {report(counts)}")
         elif args.command == "validate":
             print(f"Database valid: {report(validate_database())}")
         elif args.command == "export":

@@ -103,13 +103,13 @@ trafficTurn.Advance(trafficTurn.TurnDurationSeconds);
 trafficTurn.FinalizeTurn();
 int centerOccupants = new[] { firstTrafficUnit, secondTrafficUnit }.Count(unit =>
     unit.X == traffic.Center.X && unit.Y == traffic.Center.Y);
-Assert(centerOccupants == 1,
-    "Simultaneous movement must not stack two friendly units in the same hex.");
+Assert(centerOccupants == 2,
+    "Two friendly platoons must be allowed to coexist in one hex.");
 Assert(new[] { firstTrafficOrder, secondTrafficOrder }.Count(order =>
-           order.ExecutionState == MoveOrderExecutionState.Complete) == 1 &&
+           order.ExecutionState == MoveOrderExecutionState.Complete) == 2 &&
        new[] { firstTrafficOrder, secondTrafficOrder }.Count(order =>
-           order.ExecutionState == MoveOrderExecutionState.Partial) == 1,
-    "Traffic contention must complete one order and preserve the waiting order for the next turn.");
+           order.ExecutionState == MoveOrderExecutionState.Partial) == 0,
+    "Both orders must complete when the friendly stack fits.");
 
 (Point BypassStart, Point Blocked, Point BypassGoal) bypass = FindBypassTestCells(
     data, trafficMovement, planner, firstTrafficUnit, secondTrafficUnit);
@@ -117,6 +117,11 @@ firstTrafficUnit.X = bypass.BypassStart.X;
 firstTrafficUnit.Y = bypass.BypassStart.Y;
 secondTrafficUnit.X = bypass.Blocked.X;
 secondTrafficUnit.Y = bypass.Blocked.Y;
+ScenarioUnit extraBlocker = data.Units.First(unit => unit.Faction == firstTrafficUnit.Faction &&
+    unit.Id != firstTrafficUnit.Id && unit.Id != secondTrafficUnit.Id && StackingRules.Footprint(unit) == 2);
+Point extraSavedPosition = new(extraBlocker.X, extraBlocker.Y);
+extraBlocker.X = bypass.Blocked.X;
+extraBlocker.Y = bypass.Blocked.Y;
 PlannedMoveOrder bypassOrder = CreateOrder(firstTrafficUnit, OrderPosture.Quick,
     new RouteResult(true, [bypass.BypassStart, bypass.Blocked, bypass.BypassGoal], 2));
 var bypassTurn = new WegoMovementExecution(data, [bypassOrder]);
@@ -125,6 +130,37 @@ Assert(bypassTurn.Units[0].ReroutedForTraffic,
     "A unit held by stationary friendly traffic must find a legal bypass when one exists.");
 Assert(firstTrafficUnit.X != bypass.Blocked.X || firstTrafficUnit.Y != bypass.Blocked.Y,
     "A traffic bypass must not enter the occupied hex.");
+extraBlocker.X = extraSavedPosition.X;
+extraBlocker.Y = extraSavedPosition.Y;
+
+firstTrafficUnit.X = bypass.BypassStart.X;
+firstTrafficUnit.Y = bypass.BypassStart.Y;
+var passageOrder = CreateOrder(firstTrafficUnit, OrderPosture.Quick,
+    new RouteResult(true, [bypass.BypassStart, bypass.Blocked, bypass.BypassGoal], 2));
+var passageTurn = new WegoMovementExecution(data, [passageOrder]);
+passageTurn.Advance(passageTurn.TurnDurationSeconds);
+Assert(passageTurn.Units[0].RouteComplete && !passageTurn.Units[0].ReroutedForTraffic,
+    "A platoon must pass through one friendly platoon without a bypass.");
+ScenarioUnit hiddenBlocker = data.Units.First(unit => unit.Faction != firstTrafficUnit.Faction);
+Point hiddenSavedPosition = new(hiddenBlocker.X, hiddenBlocker.Y);
+hiddenBlocker.X = bypass.Blocked.X;
+hiddenBlocker.Y = bypass.Blocked.Y;
+firstTrafficUnit.X = bypass.BypassStart.X;
+firstTrafficUnit.Y = bypass.BypassStart.Y;
+Assert(planner.FindRoute(firstTrafficUnit, bypass.BypassStart, bypass.Blocked, OrderPosture.Quick).Success,
+    "Geometric planning must not disclose hidden enemy occupancy.");
+Assert(!planner.FindRoute(firstTrafficUnit, bypass.BypassStart, bypass.Blocked,
+    OrderPosture.Quick, new HashSet<Point> { bypass.Blocked }).Success,
+    "Known enemy destinations must be excluded when explicitly supplied.");
+var encounterOrder = CreateOrder(firstTrafficUnit, OrderPosture.Quick,
+    new RouteResult(true, [bypass.BypassStart, bypass.Blocked], 1));
+var encounterTurn = new WegoMovementExecution(data, [encounterOrder]);
+encounterTurn.Advance(encounterTurn.TurnDurationSeconds);
+Assert(firstTrafficUnit.X == bypass.BypassStart.X && firstTrafficUnit.Y == bypass.BypassStart.Y &&
+    encounterOrder.ExecutionNote == "HELD BY OPPOSING UNIT",
+    "An encountered enemy must block entry with anonymous feedback.");
+hiddenBlocker.X = hiddenSavedPosition.X;
+hiddenBlocker.Y = hiddenSavedPosition.Y;
 
 firstTrafficUnit.X = bypass.BypassStart.X;
 firstTrafficUnit.Y = bypass.BypassStart.Y;
@@ -183,6 +219,23 @@ for (int index = 0; index < controlledCells.Length; index++)
 }
 Assert(los.Trace(observerCell, targetCell).Quality == LineOfSightQuality.Clear,
     "Level clear terrain must provide a clear line of sight.");
+
+Point urbanCell = controlledCells[1];
+data.Cells[urbanCell.X, urbanCell.Y] = data.Cells[urbanCell.X, urbanCell.Y] with { Terrain = "urban" };
+Assert(los.Trace(observerCell, urbanCell).Quality == LineOfSightQuality.Obscured,
+    "The first urban hex must be visible but obscured.");
+data.Cells[observerCell.X, observerCell.Y] = data.Cells[observerCell.X, observerCell.Y] with { Elevation = 500 };
+data.Cells[controlledCells[2].X, controlledCells[2].Y] =
+    data.Cells[controlledCells[2].X, controlledCells[2].Y] with { Terrain = "urban" };
+LineOfSightQuality[,] townVisibility = los.CalculateVisibility(observerCell);
+Assert(townVisibility[urbanCell.X, urbanCell.Y] == LineOfSightQuality.Obscured &&
+    townVisibility[controlledCells[2].X, controlledCells[2].Y] == LineOfSightQuality.Blocked &&
+    townVisibility[targetCell.X, targetCell.Y] == LineOfSightQuality.Blocked &&
+    los.Trace(observerCell, targetCell).Reason == "BLOCKED BY BUILDINGS" &&
+    los.Trace(targetCell, observerCell).Quality == LineOfSightQuality.Blocked,
+    "Even an elevated observer must not see through intervening urban cells in either direction.");
+foreach (Point point in controlledCells)
+    data.Cells[point.X, point.Y] = data.Cells[point.X, point.Y] with { Terrain = "clear", Elevation = 300 };
 
 Point woodsCell = controlledCells[1];
 data.Cells[woodsCell.X, woodsCell.Y] = new MapCell(
@@ -263,6 +316,62 @@ Assert(combatTurn.IsResolved && fireOrder.State == FireOrderState.Complete &&
        enemyTank.Suppression > savedEnemySuppression && enemyTank.Strength <= savedEnemyStrength,
     "A legal WEGO shot must resolve and apply suppression and possible losses.");
 
+// Isolate the friendly observers to exercise side knowledge, not live-unit data.
+var friendlyPositions = data.Units.Where(unit => unit.Faction == tank.Faction)
+    .Select(unit => (Unit: unit, Position: new Point(unit.X, unit.Y))).ToArray();
+foreach (var entry in friendlyPositions)
+{
+    entry.Unit.X = observerCell.X;
+    entry.Unit.Y = observerCell.Y;
+}
+enemyTank.Strength = savedEnemyStrength;
+var contacts = new SideContactModel(data, tank.Faction);
+var silent = new HashSet<int>();
+contacts.Update(0, silent, silent);
+ContactReport known = contacts.Reports.Single(report => report.Name == enemyTank.Name);
+Assert(contacts.CanTarget(enemyTank), "Current visual identification must allow targeting.");
+Assert(known.IsCurrent && known.Quality == ContactQuality.Identified &&
+       known.ReportedCell == targetCell,
+    "An identified contact must reflect an actual visual observation.");
+data.Cells[woodsCell.X, woodsCell.Y] = data.Cells[woodsCell.X, woodsCell.Y] with { Terrain = "woods" };
+enemyTank.Y = controlledCells[2].Y;
+contacts.Update(10, silent, silent);
+ContactReport stale = contacts.Reports.Single(report => report.ContactId == known.ContactId);
+Assert(!contacts.CanTarget(enemyTank), "A stale sighting must not authorize targeted fire.");
+Assert(!stale.IsCurrent && stale.ReportedCell == targetCell && stale.LastObservedSeconds == 0,
+    "Hidden movement must not update a last-known contact.");
+contacts.Update(20, new HashSet<int> { enemyTank.Id }, silent);
+ContactReport cue = contacts.Reports.Single(report => report.ContactId == known.ContactId);
+Assert(cue.IsCurrent && cue.Quality == ContactQuality.Uncertain &&
+       cue.Name is null && cue.Category is null &&
+       cue.ReportedCell != new Point(enemyTank.X, enemyTank.Y),
+    "A movement cue through woods must reveal only an approximate anonymous report.");
+Assert(!contacts.CanTarget(enemyTank), "An uncertain cue must not authorize targeted fire.");
+var isolatedSide = new SideContactModel(data, "Warsaw Pact");
+Assert(isolatedSide.Reports.Count == 0,
+    "One side must never inherit the other side's contact reports.");
+contacts.Update(30, silent, new HashSet<int> { enemyTank.Id });
+Assert(contacts.Reports.Single(report => report.ContactId == known.ContactId).LastObservedSeconds == 30,
+    "A nearby firing event must refresh an anonymous cue without optical LOS.");
+int strengthBeforeHold = enemyTank.Strength;
+var heldFire = new WegoCombatExecution(data, [fireOrder], 2, (_, target) => contacts.CanTarget(target));
+heldFire.AdvanceTo(data.TurnMinutes * 60);
+Assert(!heldFire.Results.Single().Fired && enemyTank.Strength == strengthBeforeHold &&
+       fireOrder.State == FireOrderState.Invalid,
+    "WEGO must hold fire when the target is only an uncertain contact.");
+contacts.Update(631, silent, silent);
+Assert(contacts.Reports.All(report => report.ContactId != known.ContactId),
+    "Unobserved contacts must expire after the retention window.");
+var openContacts = new SideContactModel(data, tank.Faction, VisibilityDifficulty.Open);
+openContacts.Update(0, silent, silent);
+Assert(openContacts.Reports.Any(report => report.Name == enemyTank.Name && report.IsCurrent),
+    "Open difficulty must reveal enemies even without optical LOS.");
+foreach (var entry in friendlyPositions)
+{
+    entry.Unit.X = entry.Position.X;
+    entry.Unit.Y = entry.Position.Y;
+}
+
 tank.X = savedTankPosition.X;
 tank.Y = savedTankPosition.Y;
 enemyTank.X = savedEnemyPosition.X;
@@ -279,7 +388,7 @@ for (int index = 0; index < controlledCells.Length; index++)
 
 Console.WriteLine($"Movement tests passed: {data.Crossings.Count} crossing edges, " +
                   $"legal detour cost {detourRoute.Cost / 10f:0.0}; " +
-                  "WEGO partial, contention, traffic-bypass, LOS, and direct-fire checks passed.");
+                  "WEGO partial, contention, traffic-bypass, LOS, direct-fire, and contact-model checks passed.");
 return;
 
 static PlannedMoveOrder CreateOrder(

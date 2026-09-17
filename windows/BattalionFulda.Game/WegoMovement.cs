@@ -1,5 +1,15 @@
 namespace BattalionFulda;
 
+internal static class StackingRules
+{
+    public const int Capacity = 4;
+    // Provisional footprint, not a historical formation-strength rating.
+    public static int Footprint(ScenarioUnit unit) =>
+        unit.Category.Equals("command", StringComparison.OrdinalIgnoreCase) ||
+        unit.Category.Equals("headquarters", StringComparison.OrdinalIgnoreCase) ||
+        unit.Category.Equals("anti_tank", StringComparison.OrdinalIgnoreCase) ? 1 : 2;
+}
+
 internal sealed class UnitMovementExecution
 {
     private readonly MovementModel movement;
@@ -77,7 +87,9 @@ internal sealed class UnitMovementExecution
         BlockingUnit = blocker;
         Order.ExecutionNote = blocker is null
             ? "YIELDING TO TRAFFIC"
-            : $"HELD BY {blocker.Name.ToUpperInvariant()}";
+            : blocker.Faction.Equals(Order.Unit.Faction, StringComparison.OrdinalIgnoreCase)
+                ? $"HELD BY {blocker.Name.ToUpperInvariant()}"
+                : "HELD BY OPPOSING UNIT";
     }
 
     public bool TryTrafficBypass(
@@ -227,32 +239,38 @@ internal sealed class WegoMovementExecution
             .ToArray();
         if (candidates.Length == 0) return;
 
-        var winners = candidates
-            .GroupBy(unit => unit.Next)
-            .Select(group => group.OrderBy(unit => unit.Order.Unit.Id).First())
-            .ToHashSet();
-
-        foreach (UnitMovementExecution candidate in candidates)
+        foreach (UnitMovementExecution candidate in candidates.OrderBy(unit => unit.Order.Unit.Id))
         {
-            ScenarioUnit? occupant = data.Units.FirstOrDefault(unit =>
+            ScenarioUnit[] occupants = data.Units.Where(unit =>
                 !unit.IsDestroyed && !ReferenceEquals(unit, candidate.Order.Unit) &&
-                unit.X == candidate.Next.X && unit.Y == candidate.Next.Y);
-            if (winners.Contains(candidate) && occupant is null)
+                unit.X == candidate.Next.X && unit.Y == candidate.Next.Y).ToArray();
+            ScenarioUnit? enemy = occupants.FirstOrDefault(unit =>
+                !unit.Faction.Equals(candidate.Order.Unit.Faction, StringComparison.OrdinalIgnoreCase));
+            if (enemy is null && occupants.Sum(StackingRules.Footprint) +
+                StackingRules.Footprint(candidate.Order.Unit) <= StackingRules.Capacity)
                 candidate.CompleteStep();
             else
             {
-                ScenarioUnit? contender = occupant ?? candidates.FirstOrDefault(other =>
-                    !ReferenceEquals(other, candidate) && other.Next == candidate.Next)?.Order.Unit;
-                candidate.HoldForTraffic(contender, quantumSeconds);
+                candidate.HoldForTraffic(enemy ?? occupants.FirstOrDefault(), quantumSeconds);
+                if (enemy is null) candidate.Order.ExecutionNote = "TRAFFIC HOLD — FRIENDLY HEX AT CAPACITY";
             }
         }
 
         foreach (UnitMovementExecution candidate in candidates.Where(unit => unit.WaitingForTraffic))
         {
             HashSet<Point> occupied = data.Units
-                .Where(unit => !unit.IsDestroyed && !ReferenceEquals(unit, candidate.Order.Unit))
-                .Select(unit => new Point(unit.X, unit.Y))
+                .Where(unit => !unit.IsDestroyed && !ReferenceEquals(unit, candidate.Order.Unit) &&
+                    unit.Faction.Equals(candidate.Order.Unit.Faction, StringComparison.OrdinalIgnoreCase))
+                .GroupBy(unit => new Point(unit.X, unit.Y))
+                .Where(group => group.Sum(StackingRules.Footprint) +
+                    StackingRules.Footprint(candidate.Order.Unit) > StackingRules.Capacity)
+                .Select(group => group.Key)
                 .ToHashSet();
+            // Only the directly encountered enemy is known to this traffic resolver.
+            // Never use unseen enemy positions to choose a bypass.
+            if (candidate.BlockingUnit is ScenarioUnit blocker &&
+                !blocker.Faction.Equals(candidate.Order.Unit.Faction, StringComparison.OrdinalIgnoreCase))
+                occupied.Add(candidate.Next);
             candidate.TryTrafficBypass(routePlanner, occupied);
         }
     }

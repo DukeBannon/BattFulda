@@ -17,6 +17,28 @@ class DatabaseTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_researched_ranges_preserve_map_edits(self) -> None:
+        connection = manage_database.connect(self.database)
+        try:
+            connection.execute("UPDATE map_cell SET elevation_m=333 WHERE map_id=1 AND x=0 AND y=0")
+            connection.execute("UPDATE unit_type SET range_cells=1 WHERE type_key='us_tank_platoon_m1'")
+            connection.commit()
+        finally:
+            connection.close()
+        manage_database.sync_researched_ranges(self.database)
+        connection = manage_database.connect(self.database)
+        try:
+            for key, expected in [("us_tank_platoon_m1", 10), ("us_atgm_team_tow", 15),
+                                  ("su_tank_platoon_t64b", 8)]:
+                self.assertEqual(connection.execute(
+                    "SELECT range_cells FROM unit_type WHERE type_key=?", (key,)
+                ).fetchone()[0], expected)
+            self.assertEqual(connection.execute(
+                "SELECT elevation_m FROM map_cell WHERE map_id=1 AND x=0 AND y=0"
+            ).fetchone()[0], 333)
+        finally:
+            connection.close()
+
     def test_seeded_relationships_and_state(self) -> None:
         counts = manage_database.validate_database(self.database)
         self.assertEqual(counts, {

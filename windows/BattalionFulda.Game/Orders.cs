@@ -59,11 +59,6 @@ internal sealed class MovementModel(GameData data)
             !terrain.Passable)
             return null;
 
-        if (data.Units.Any(other =>
-                !other.IsDestroyed && other.Id != unit.Id && other.X == to.X && other.Y == to.Y &&
-                !other.Faction.Equals(unit.Faction, StringComparison.OrdinalIgnoreCase)))
-            return null;
-
         int cost = terrain.For(posture);
         HexEdgeKey key = HexEdgeKey.Create(from, to);
         data.Crossings.TryGetValue(key, out MapEdge? crossing);

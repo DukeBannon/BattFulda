@@ -18,7 +18,12 @@ Visual Studio 2026 is the recommended IDE. PowerShell and `dotnet` remain the
 authoritative build path, so an IDE-specific project configuration is never
 required to reproduce a build.
 
-## Build and run W2.4
+## Build and run W2.5
+
+W2.5 adds the first playable spotting and fog-of-war integration. Standard
+visibility hides enemy units until identified or reported as uncertain contacts.
+Use OPTIONS or F5 in Planning/Review to change the visibility preset. Open
+restores full visibility for comparison. See `docs/W2.5.md` for testing and limits.
 
 Open `BattalionFulda.sln` in Visual Studio 2026, or run:
 

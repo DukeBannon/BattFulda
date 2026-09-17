@@ -49,6 +49,11 @@ internal sealed class LineOfSightModel(GameData data)
             if (cell.Terrain.Equals("woods", StringComparison.OrdinalIgnoreCase))
                 return new LineOfSightResult(
                     LineOfSightQuality.Blocked, range, line, point, "BLOCKED BY WOODS");
+            // Dense built-up cells have no modeled street-level firing corridors.
+            // See into the first urban destination, never through intervening town cells.
+            if (cell.Terrain.Equals("urban", StringComparison.OrdinalIgnoreCase))
+                return new LineOfSightResult(
+                    LineOfSightQuality.Blocked, range, line, point, "BLOCKED BY BUILDINGS");
             double fraction = index / (double)range;
             double sightHeight = sourceHeight + (targetHeight - sourceHeight) * fraction;
             double obstacleHeight = cell.Elevation + ObstacleHeight(cell);
@@ -269,13 +274,16 @@ internal sealed class WegoCombatExecution
     private readonly DirectFireModel combat;
     private readonly int turnNumber;
     private readonly double fireTimeSeconds;
+    private readonly Func<ScenarioUnit, ScenarioUnit, bool>? canTarget;
     private bool resolved;
 
     public WegoCombatExecution(
-        GameData data, IEnumerable<PlannedFireOrder> orders, int turnNumber)
+        GameData data, IEnumerable<PlannedFireOrder> orders, int turnNumber,
+        Func<ScenarioUnit, ScenarioUnit, bool>? canTarget = null)
     {
         combat = new DirectFireModel(data);
         this.turnNumber = turnNumber;
+        this.canTarget = canTarget;
         Orders = orders.OrderBy(order => order.Unit.Id).ToArray();
         foreach (PlannedFireOrder order in Orders) order.State = FireOrderState.Executing;
         fireTimeSeconds = data.TurnMinutes * 60.0 * 0.2;
@@ -288,7 +296,10 @@ internal sealed class WegoCombatExecution
     public void AdvanceTo(double elapsedGameSeconds)
     {
         if (resolved || elapsedGameSeconds < fireTimeSeconds) return;
-        CombatResult[] results = Orders.Select(order => combat.Resolve(order, turnNumber)).ToArray();
+        CombatResult[] results = Orders.Select(order =>
+            canTarget is not null && !canTarget(order.Unit, order.Target)
+                ? new CombatResult(order, false, 0, 0, "TARGET CONTACT LOST — FIRE HELD")
+                : combat.Resolve(order, turnNumber)).ToArray();
         foreach (CombatResult result in results)
         {
             DirectFireModel.Apply(result);
