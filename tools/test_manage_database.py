@@ -1,5 +1,6 @@
 import csv
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
@@ -219,6 +220,13 @@ class DatabaseTests(unittest.TestCase):
     def test_exports_are_complete_and_readable(self) -> None:
         output = self.root / "exports"
         manage_database.export_database(self.database, output)
+        connection = sqlite3.connect(self.database)
+        try:
+            movement_parameter_count = connection.execute(
+                "SELECT COUNT(*) FROM movement_parameter"
+            ).fetchone()[0]
+        finally:
+            connection.close()
         expected_rows = {
             "unit_types.csv": 64,
             "scenarios.csv": 1,
@@ -234,7 +242,7 @@ class DatabaseTests(unittest.TestCase):
             "terrain_movement_costs.csv": 35,
             "road_movement_costs.csv": 15,
             "water_crossing_costs.csv": 45,
-            "movement_parameters.csv": 4,
+            "movement_parameters.csv": movement_parameter_count,
         }
         for name, expected in expected_rows.items():
             with (output / name).open(encoding="utf-8", newline="") as source:

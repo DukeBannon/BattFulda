@@ -126,9 +126,160 @@ Assert(bypassTurn.Units[0].ReroutedForTraffic,
 Assert(firstTrafficUnit.X != bypass.Blocked.X || firstTrafficUnit.Y != bypass.Blocked.Y,
     "A traffic bypass must not enter the occupied hex.");
 
+firstTrafficUnit.X = bypass.BypassStart.X;
+firstTrafficUnit.Y = bypass.BypassStart.Y;
+RouteResult continuation = new[] { new Point(5, 5), new Point(80, 65) }
+    .Select(goal => planner.FindRoute(firstTrafficUnit, bypass.BypassGoal, goal, OrderPosture.Quick))
+    .First(route => route.Success && route.Cells.Count > 3);
+PlannedMoveOrder preservedOrder = CreateOrder(firstTrafficUnit, OrderPosture.Quick,
+    new RouteResult(true,
+        new[] { bypass.BypassStart, bypass.Blocked, bypass.BypassGoal }
+            .Concat(continuation.Cells.Skip(1)).ToArray(), 1));
+preservedOrder.Waypoints.Clear();
+preservedOrder.Waypoints.Add(bypass.BypassGoal);
+preservedOrder.Waypoints.Add(continuation.Cells[^1]);
+Point[] originalWaypoints = preservedOrder.Waypoints.ToArray();
+var localBypass = new UnitMovementExecution(preservedOrder, trafficMovement, data.TurnMinutes * 60);
+localBypass.HoldForTraffic(secondTrafficUnit, 46);
+Assert(localBypass.TryTrafficBypass(planner, new HashSet<Point> { bypass.Blocked }),
+    "A local bypass should rejoin the original route after stationary traffic.");
+Assert(preservedOrder.Waypoints.SequenceEqual(originalWaypoints) &&
+       preservedOrder.Route.TakeLast(continuation.Cells.Count - 1)
+           .SequenceEqual(continuation.Cells.Skip(1)),
+    "Traffic bypass must preserve intermediate waypoints and the original route beyond the rejoin.");
+PlannedMoveOrder blockedWaypointOrder = CreateOrder(firstTrafficUnit, OrderPosture.Quick,
+    new RouteResult(true, [bypass.BypassStart, bypass.Blocked, bypass.BypassGoal], 1));
+blockedWaypointOrder.Waypoints.Insert(0, bypass.Blocked);
+var blockedWaypointExecution = new UnitMovementExecution(
+    blockedWaypointOrder, trafficMovement, data.TurnMinutes * 60);
+blockedWaypointExecution.HoldForTraffic(secondTrafficUnit, 46);
+Assert(!blockedWaypointExecution.TryTrafficBypass(planner, new HashSet<Point> { bypass.Blocked }) &&
+       blockedWaypointOrder.Waypoints[0] == bypass.Blocked,
+    "An occupied player waypoint must remain a hold, not be skipped by a bypass.");
+
+var los = new LineOfSightModel(data);
+for (int x = 0; x < data.MapWidth; x++)
+for (int y = 0; y < data.MapHeight; y++)
+{
+    Point source = new(x, y);
+    for (int nx = Math.Max(0, x - 1); nx <= Math.Min(data.MapWidth - 1, x + 1); nx++)
+    for (int ny = Math.Max(0, y - 1); ny <= Math.Min(data.MapHeight - 1, y + 1); ny++)
+    {
+        Point neighbor = new(nx, ny);
+        if (LineOfSightModel.HexDistance(source, neighbor) != 1) continue;
+        Assert(los.Trace(source, neighbor).Quality != LineOfSightQuality.Blocked,
+            "Adjacent hexes must be visible regardless of elevation or concealing terrain.");
+    }
+}
+Point observerCell = new(10, 10);
+Point targetCell = new(10, 13);
+Point[] controlledCells = [observerCell, new Point(10, 11), new Point(10, 12), targetCell];
+MapCell[] originalCells = controlledCells.Select(point => data.Cells[point.X, point.Y]).ToArray();
+for (int index = 0; index < controlledCells.Length; index++)
+{
+    Point point = controlledCells[index];
+    data.Cells[point.X, point.Y] = new MapCell(
+        point.X, point.Y, 300, "clear", 0, 0, 0, 0, 0, false);
+}
+Assert(los.Trace(observerCell, targetCell).Quality == LineOfSightQuality.Clear,
+    "Level clear terrain must provide a clear line of sight.");
+
+Point woodsCell = controlledCells[1];
+data.Cells[woodsCell.X, woodsCell.Y] = new MapCell(
+    woodsCell.X, woodsCell.Y, 300, "woods", 0, 0, 0, 0, 0, false);
+LineOfSightResult blockedForward = los.Trace(observerCell, targetCell);
+LineOfSightResult blockedReverse = los.Trace(targetCell, observerCell);
+Assert(blockedForward.Quality == LineOfSightQuality.Blocked &&
+       blockedReverse.Quality == LineOfSightQuality.Blocked &&
+       blockedForward.BlockingCell == blockedReverse.BlockingCell,
+    "Woods blocking must be symmetric in both LOS directions.");
+Assert(los.Trace(observerCell, woodsCell).Quality == LineOfSightQuality.Obscured,
+    "The first wooded hex must be visible but obscured.");
+data.Cells[observerCell.X, observerCell.Y] = data.Cells[observerCell.X, observerCell.Y] with { Elevation = 500 };
+data.Cells[controlledCells[2].X, controlledCells[2].Y] =
+    data.Cells[controlledCells[2].X, controlledCells[2].Y] with { Terrain = "woods" };
+LineOfSightQuality[,] forestVisibility = los.CalculateVisibility(observerCell);
+Assert(forestVisibility[woodsCell.X, woodsCell.Y] == LineOfSightQuality.Obscured &&
+       forestVisibility[controlledCells[2].X, controlledCells[2].Y] == LineOfSightQuality.Blocked &&
+       forestVisibility[targetCell.X, targetCell.Y] == LineOfSightQuality.Blocked &&
+       los.Trace(targetCell, observerCell).Quality == LineOfSightQuality.Blocked,
+    "A high observer must not see deeper into or through woods, in either direction.");
+data.Cells[observerCell.X, observerCell.Y] = data.Cells[observerCell.X, observerCell.Y] with { Elevation = 300 };
+data.Cells[controlledCells[2].X, controlledCells[2].Y] =
+    data.Cells[controlledCells[2].X, controlledCells[2].Y] with { Terrain = "clear" };
+
+data.Cells[woodsCell.X, woodsCell.Y] = new MapCell(
+    woodsCell.X, woodsCell.Y, 410, "clear", 0, 0, 0, 0, 0, false);
+Assert(los.Trace(observerCell, targetCell).Reason == "BLOCKED BY ELEVATION",
+    "An intervening ridge must block line of sight.");
+
+foreach ((Point point, MapCell original) in controlledCells.Zip(originalCells))
+    data.Cells[point.X, point.Y] = new MapCell(
+        point.X, point.Y, 300, "clear", 0, 0, 0, 0, 0, false);
+data.Cells[targetCell.X, targetCell.Y] = new MapCell(
+    targetCell.X, targetCell.Y, 300, "cultivated", 0, 0, 0, 0, 0, false);
+Assert(los.Trace(observerCell, targetCell).Quality == LineOfSightQuality.Obscured,
+    "Cultivated target terrain must obscure rather than block line of sight.");
+LineOfSightQuality[,] visibility = los.CalculateVisibility(observerCell);
+Assert(visibility[observerCell.X, observerCell.Y] == LineOfSightQuality.Clear &&
+       visibility[targetCell.X, targetCell.Y] == LineOfSightQuality.Obscured,
+    "Visibility overlay must include the observer and obscured visible hexes.");
+for (int x = 0; x < data.MapWidth; x++)
+for (int y = 0; y < data.MapHeight; y++)
+    Assert(visibility[x, y] == los.Trace(observerCell, new Point(x, y)).Quality,
+        "Every overlay hex must agree with combat LOS, without a weapon-range cutoff.");
+data.Cells[targetCell.X, targetCell.Y] = new MapCell(
+    targetCell.X, targetCell.Y, 300, "clear", 0, 0, 0, 0, 0, false);
+
+ScenarioUnit enemyTank = data.Units.First(unit =>
+    !unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase) &&
+    unit.Category == "tank");
+Point savedTankPosition = new(tank.X, tank.Y);
+Point savedEnemyPosition = new(enemyTank.X, enemyTank.Y);
+int savedEnemyStrength = enemyTank.Strength;
+int savedEnemySuppression = enemyTank.Suppression;
+int savedEnemyReadiness = enemyTank.Readiness;
+int savedEnemyMorale = enemyTank.Morale;
+tank.X = observerCell.X;
+tank.Y = observerCell.Y;
+enemyTank.X = targetCell.X;
+enemyTank.Y = targetCell.Y;
+var directFire = new DirectFireModel(data);
+FireValidation legalShot = directFire.Validate(tank, enemyTank);
+Assert(legalShot.CanFire && legalShot.LineOfSight.Range == 3,
+    "A clear enemy target inside weapon range must accept a direct-fire order.");
+var fireOrder = new PlannedFireOrder
+{
+    Unit = tank,
+    Target = enemyTank,
+    LineOfSight = legalShot.LineOfSight
+};
+var combatTurn = new WegoCombatExecution(data, [fireOrder], 1);
+combatTurn.AdvanceTo(data.TurnMinutes * 60 * 0.2 - 1);
+Assert(!combatTurn.IsResolved,
+    "WEGO fire must wait for its scheduled resolution time.");
+combatTurn.AdvanceTo(data.TurnMinutes * 60 * 0.2);
+Assert(combatTurn.IsResolved && fireOrder.State == FireOrderState.Complete &&
+       enemyTank.Suppression > savedEnemySuppression && enemyTank.Strength <= savedEnemyStrength,
+    "A legal WEGO shot must resolve and apply suppression and possible losses.");
+
+tank.X = savedTankPosition.X;
+tank.Y = savedTankPosition.Y;
+enemyTank.X = savedEnemyPosition.X;
+enemyTank.Y = savedEnemyPosition.Y;
+enemyTank.Strength = savedEnemyStrength;
+enemyTank.Suppression = savedEnemySuppression;
+enemyTank.Readiness = savedEnemyReadiness;
+enemyTank.Morale = savedEnemyMorale;
+for (int index = 0; index < controlledCells.Length; index++)
+{
+    Point point = controlledCells[index];
+    data.Cells[point.X, point.Y] = originalCells[index];
+}
+
 Console.WriteLine($"Movement tests passed: {data.Crossings.Count} crossing edges, " +
                   $"legal detour cost {detourRoute.Cost / 10f:0.0}; " +
-                  "WEGO partial, contention, and traffic-bypass checks passed.");
+                  "WEGO partial, contention, traffic-bypass, LOS, and direct-fire checks passed.");
 return;
 
 static PlannedMoveOrder CreateOrder(

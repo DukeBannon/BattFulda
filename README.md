@@ -18,7 +18,7 @@ Visual Studio 2026 is the recommended IDE. PowerShell and `dotnet` remain the
 authoritative build path, so an IDE-specific project configuration is never
 required to reproduce a build.
 
-## Build and run W2.3
+## Build and run W2.4
 
 Open `BattalionFulda.sln` in Visual Studio 2026, or run:
 
@@ -27,7 +27,7 @@ cd C:\Repositories\Games\BattFulda
 .\build-windows.ps1 -Run
 ```
 
-W2.3 loads the 92 by 80 Point Alpha battlefield at 250 meters per hex. It retains
+W2.4 loads the 92 by 80 Point Alpha battlefield at 250 meters per hex. It retains
 the original projected road and river paths, derives bridges at their geographic
 intersections, distinguishes cultivated terrain, and caches visible terrain
 chunks for smooth navigation. The compact hex-edge topology and full geographic
@@ -40,13 +40,19 @@ draft. Route previews use data-driven A* pathfinding with mobility-specific
 terrain, road, elevation, bridge, ford, stream, and river costs. Illegal routes
 are marked in red and cannot be confirmed.
 
-The Execute footer command resolves every confirmed movement order
-simultaneously across the scenario's 15-minute turn. Counters animate between
+The Execute footer command resolves every confirmed movement and direct-fire
+order simultaneously across the scenario's 15-minute turn. Counters animate between
 hexes, Quick/Tactical/Hunt costs determine their progress, occupied hexes cause
 traffic holds, and unfinished routes carry into the next turn. Pause and Resume
 are available during playback; completed movement enters a review phase before
-the next planning turn. See `docs\W2.3.md` for the milestone boundary and
-acceptance target.
+the next planning turn.
+
+Select a friendly counter and choose Fire from its right-click menu or the
+footer. The target cursor previews a clear, obscured, blocked, or out-of-range
+line of sight. A confirmed shot resolves during WEGO playback using the unit's
+external hard/soft attack, defence, and range data, producing strength,
+suppression, readiness, and morale effects. See `docs\W2.4.md` for the milestone
+boundary and acceptance target.
 
 ## Relational data foundation
 

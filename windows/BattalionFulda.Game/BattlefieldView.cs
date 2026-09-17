@@ -26,8 +26,11 @@ internal sealed class BattlefieldView : Control
     private readonly Dictionary<(int X, int Y), Bitmap> terrainChunks = [];
     private readonly Dictionary<(int X, int Y, int RoadClass), MapVertex> roadSnapCache = [];
     private readonly Dictionary<int, PlannedMoveOrder> plannedOrders = [];
+    private readonly Dictionary<int, PlannedFireOrder> plannedFireOrders = [];
     private readonly ContextMenuStrip unitActionMenu = new();
     private readonly AStarRoutePlanner routePlanner;
+    private readonly LineOfSightModel lineOfSight;
+    private readonly DirectFireModel directFire;
     private float terrainLayerCellSize;
     private Bitmap? miniMapLayer;
     private readonly System.Windows.Forms.Timer edgeScrollTimer = new() { Interval = 16 };
@@ -46,7 +49,11 @@ internal sealed class BattlefieldView : Control
     private MouseButtons dragButton;
     private bool navigatingMiniMap;
     private PlannedMoveOrder? plottingOrder;
+    private ScenarioUnit? targetingFireUnit;
+    private ScenarioUnit? inspectingLosUnit;
+    private LineOfSightQuality[,]? losVisibility;
     private WegoMovementExecution? movementExecution;
+    private WegoCombatExecution? combatExecution;
     private TurnPhase turnPhase = TurnPhase.Planning;
     private bool executionPaused;
     private int turnNumber = 1;
@@ -61,6 +68,8 @@ internal sealed class BattlefieldView : Control
         this.data = data;
         scenarioTime = data.ScenarioStart;
         routePlanner = new AStarRoutePlanner(data);
+        lineOfSight = new LineOfSightModel(data);
+        directFire = new DirectFireModel(data);
         DoubleBuffered = true;
         ResizeRedraw = true;
         TabStop = true;
@@ -75,6 +84,18 @@ internal sealed class BattlefieldView : Control
 
     public bool HandleKey(Keys key)
     {
+        if (key == Keys.L)
+        {
+            ToggleLosInspection();
+            return true;
+        }
+        if (inspectingLosUnit is not null && key == Keys.Escape)
+        {
+            inspectingLosUnit = null;
+            Invalidate();
+            return true;
+        }
+        if (inspectingLosUnit is not null && key == Keys.Enter) return true;
         if (turnPhase == TurnPhase.Executing && key == Keys.Space)
         {
             ToggleExecutionPause();
@@ -93,14 +114,16 @@ internal sealed class BattlefieldView : Control
             case Keys.W or Keys.Up: MoveCursor(0, -1); return true;
             case Keys.S or Keys.Down: MoveCursor(0, 1); return true;
             case Keys.Enter:
-                if (plottingOrder is not null) AddWaypointAtCursor();
+                if (targetingFireUnit is not null) ConfirmFireTargetAtCursor();
+                else if (plottingOrder is not null) AddWaypointAtCursor();
                 else SelectUnitAtCursor();
                 return true;
             case Keys.Back:
                 if (plottingOrder is not null) UndoWaypoint();
                 return plottingOrder is not null;
             case Keys.Escape:
-                if (plottingOrder is not null) CancelPlotting();
+                if (targetingFireUnit is not null) CancelFireTargeting();
+                else if (plottingOrder is not null) CancelPlotting();
                 else unitActionMenu.Close();
                 return true;
             case Keys.Add or Keys.Oemplus:
@@ -146,11 +169,12 @@ internal sealed class BattlefieldView : Control
         };
         unitActionMenu.Items.Add(move);
         unitActionMenu.Items.Add(new ToolStripSeparator());
-        unitActionMenu.Items.Add("FIRE", null, (_, _) => ShowDeferredAction("FIRE — W2.4"));
-        unitActionMenu.Items.Add("ASSAULT", null, (_, _) => ShowDeferredAction("ASSAULT — W2.4"));
+        unitActionMenu.Items.Add("FIRE", null, (_, _) => BeginFireOrder());
+        unitActionMenu.Items.Add("ASSAULT", null, (_, _) => ShowDeferredAction("ASSAULT — W2.6"));
         unitActionMenu.Items.Add("DEFEND", null, (_, _) => ShowDeferredAction("DEFEND — FUTURE"));
         unitActionMenu.Items.Add(new ToolStripSeparator());
         unitActionMenu.Items.Add("CANCEL ORDERS", null, (_, _) => ClearSelectedOrder());
+        unitActionMenu.Items.Add("INSPECT LOS", null, (_, _) => ToggleLosInspection());
     }
 
     private void ShowDeferredAction(string message)
@@ -169,7 +193,8 @@ internal sealed class BattlefieldView : Control
         unitActionMenu.Items[2].Enabled = friendly;
         unitActionMenu.Items[3].Enabled = friendly;
         unitActionMenu.Items[4].Enabled = friendly;
-        unitActionMenu.Items[6].Enabled = friendly && plannedOrders.ContainsKey(selectedUnit.Id);
+        unitActionMenu.Items[6].Enabled = friendly &&
+            (plannedOrders.ContainsKey(selectedUnit.Id) || plannedFireOrders.ContainsKey(selectedUnit.Id));
         orderNotice = friendly ? null : "ENEMY UNIT — INFORMATION ONLY";
         unitActionMenu.Show(this, location);
         Invalidate();
@@ -181,6 +206,9 @@ internal sealed class BattlefieldView : Control
             !selectedUnit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase))
             return;
 
+        plannedFireOrders.Remove(selectedUnit.Id);
+        inspectingLosUnit = null;
+        targetingFireUnit = null;
         plottingOrder = new PlannedMoveOrder { Unit = selectedUnit, Posture = posture };
         selectedCell = new Point(selectedUnit.X, selectedUnit.Y);
         orderNotice = null;
@@ -242,34 +270,127 @@ internal sealed class BattlefieldView : Control
         Invalidate();
     }
 
+    private void BeginFireOrder()
+    {
+        if (turnPhase != TurnPhase.Planning || selectedUnit is null || selectedUnit.IsDestroyed ||
+            !selectedUnit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase))
+            return;
+        if (selectedUnit.Category is "artillery" or "rocket_artillery")
+        {
+            orderNotice = "INDIRECT FIRE WILL ARRIVE IN A LATER MILESTONE";
+            Invalidate();
+            return;
+        }
+
+        plottingOrder = null;
+        inspectingLosUnit = null;
+        targetingFireUnit = selectedUnit;
+        selectedCell = new Point(selectedUnit.X, selectedUnit.Y);
+        orderNotice = $"SELECT ENEMY TARGET — RANGE {selectedUnit.RangeCells} HEXES";
+        Invalidate();
+    }
+
+    private void ConfirmFireTargetAtCursor()
+    {
+        if (targetingFireUnit is null || selectedCell is not Point cell) return;
+        ScenarioUnit? target = data.Units.LastOrDefault(unit => !unit.IsDestroyed &&
+            unit.X == cell.X && unit.Y == cell.Y &&
+            !unit.Faction.Equals(targetingFireUnit.Faction, StringComparison.OrdinalIgnoreCase));
+        if (target is null)
+        {
+            orderNotice = "SELECT AN ENEMY UNIT";
+            Invalidate();
+            return;
+        }
+
+        FireValidation validation = directFire.Validate(targetingFireUnit, target);
+        if (!validation.CanFire)
+        {
+            orderNotice = validation.Message;
+            Invalidate();
+            return;
+        }
+
+        plannedOrders.Remove(targetingFireUnit.Id);
+        plannedFireOrders[targetingFireUnit.Id] = new PlannedFireOrder
+        {
+            Unit = targetingFireUnit,
+            Target = target,
+            LineOfSight = validation.LineOfSight
+        };
+        selectedUnit = targetingFireUnit;
+        selectedCell = new Point(targetingFireUnit.X, targetingFireUnit.Y);
+        orderNotice = $"FIRE PLANNED — {target.Name.ToUpperInvariant()}";
+        targetingFireUnit = null;
+        Invalidate();
+    }
+
+    private void CancelFireTargeting()
+    {
+        targetingFireUnit = null;
+        orderNotice = "FIRE ORDER CANCELLED";
+        Invalidate();
+    }
+
+    private void ToggleLosInspection()
+    {
+        if (inspectingLosUnit is not null)
+        {
+            inspectingLosUnit = null;
+            Invalidate();
+            return;
+        }
+        if (turnPhase == TurnPhase.Executing || selectedUnit is null || selectedUnit.IsDestroyed)
+        {
+            orderNotice = "SELECT A UNIT IN PLANNING OR REVIEW TO INSPECT LOS";
+            Invalidate();
+            return;
+        }
+        plottingOrder = null;
+        targetingFireUnit = null;
+        inspectingLosUnit = selectedUnit;
+        selectedCell = new Point(selectedUnit.X, selectedUnit.Y);
+        losVisibility = lineOfSight.CalculateVisibility(selectedCell.Value);
+        orderNotice = null;
+        Invalidate();
+    }
+
     private void ClearSelectedOrder()
     {
         if (turnPhase != TurnPhase.Planning || selectedUnit is null) return;
         plannedOrders.Remove(selectedUnit.Id);
+        plannedFireOrders.Remove(selectedUnit.Id);
         if (ReferenceEquals(plottingOrder?.Unit, selectedUnit)) plottingOrder = null;
+        if (ReferenceEquals(targetingFireUnit, selectedUnit)) targetingFireUnit = null;
         orderNotice = "ORDERS CLEARED";
         Invalidate();
     }
 
     private void BeginExecution()
     {
-        if (turnPhase != TurnPhase.Planning || plottingOrder is not null) return;
-        lastOpposingOrderCount = GenerateOpposingMovementOrders();
+        if (turnPhase != TurnPhase.Planning || plottingOrder is not null ||
+            targetingFireUnit is not null) return;
+        lastOpposingOrderCount = GenerateOpposingOrders();
         PlannedMoveOrder[] executable = plannedOrders.Values
-            .Where(order => order.Confirmed && order.Route.Count > 1)
+            .Where(order => !order.Unit.IsDestroyed && order.Confirmed && order.Route.Count > 1)
             .ToArray();
-        if (executable.Length == 0)
+        PlannedFireOrder[] fireOrders = plannedFireOrders.Values
+            .Where(order => !order.Unit.IsDestroyed && !order.Target.IsDestroyed)
+            .ToArray();
+        if (executable.Length == 0 && fireOrders.Length == 0)
         {
-            orderNotice = "NO PLANNED MOVEMENT ORDERS";
+            orderNotice = "NO PLANNED ORDERS";
             Invalidate();
             return;
         }
 
         unitActionMenu.Close();
         movementExecution = new WegoMovementExecution(data, executable);
+        combatExecution = new WegoCombatExecution(data, fireOrders, turnNumber);
         turnPhase = TurnPhase.Executing;
         executionPaused = false;
-        orderNotice = $"TURN {turnNumber} EXECUTING — {executable.Length} UNITS" +
+        orderNotice = $"TURN {turnNumber} EXECUTING — {executable.Length} MOVE, " +
+                      $"{fireOrders.Length} FIRE" +
                       (lastOpposingOrderCount > 0
                           ? $" ({lastOpposingOrderCount} PACT ORDERS ISSUED)"
                           : string.Empty);
@@ -278,16 +399,38 @@ internal sealed class BattlefieldView : Control
         Invalidate();
     }
 
-    private int GenerateOpposingMovementOrders()
+    private int GenerateOpposingOrders()
     {
-        ScenarioUnit[] friendlyUnits = data.Units.Where(unit =>
+        ScenarioUnit[] friendlyUnits = data.Units.Where(unit => !unit.IsDestroyed &&
             unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (friendlyUnits.Length == 0) return 0;
 
         int generated = 0;
         foreach (ScenarioUnit unit in data.Units.Where(unit =>
+                     !unit.IsDestroyed &&
                      !unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase)))
         {
+            ScenarioUnit? fireTarget = friendlyUnits
+                .Where(candidate => !candidate.IsDestroyed)
+                .Select(candidate => (Unit: candidate, Validation: directFire.Validate(unit, candidate)))
+                .Where(candidate => candidate.Validation.CanFire)
+                .OrderBy(candidate => candidate.Validation.LineOfSight.Range)
+                .Select(candidate => candidate.Unit)
+                .FirstOrDefault();
+            if (fireTarget is not null)
+            {
+                FireValidation validation = directFire.Validate(unit, fireTarget);
+                plannedOrders.Remove(unit.Id);
+                plannedFireOrders[unit.Id] = new PlannedFireOrder
+                {
+                    Unit = unit,
+                    Target = fireTarget,
+                    LineOfSight = validation.LineOfSight
+                };
+                generated++;
+                continue;
+            }
+
             if (plannedOrders.TryGetValue(unit.Id, out PlannedMoveOrder? existing) &&
                 existing.ExecutionState == MoveOrderExecutionState.Partial &&
                 existing.Route.Count > 1)
@@ -328,6 +471,7 @@ internal sealed class BattlefieldView : Control
             order.Route.AddRange(route.Cells);
             order.Waypoints.Add(route.Cells[^1]);
             plannedOrders[unit.Id] = order;
+            plannedFireOrders.Remove(unit.Id);
             generated++;
         }
         return generated;
@@ -372,10 +516,13 @@ internal sealed class BattlefieldView : Control
         double realSeconds = Math.Min(0.1, executionClock.Elapsed.TotalSeconds);
         executionClock.Restart();
         movementExecution.Advance(realSeconds * PlaybackGameSecondsPerRealSecond);
+        combatExecution?.AdvanceTo(movementExecution.ElapsedGameSeconds);
         if (selectedUnit is not null)
             selectedCell = new Point(selectedUnit.X, selectedUnit.Y);
 
-        if (movementExecution.IsComplete) CompleteExecution();
+        bool combatDone = combatExecution is null || combatExecution.Orders.Count == 0 ||
+                          combatExecution.IsResolved;
+        if (movementExecution.IsComplete && combatDone) CompleteExecution();
         Invalidate();
     }
 
@@ -385,6 +532,7 @@ internal sealed class BattlefieldView : Control
         executionTimer.Stop();
         executionClock.Stop();
         movementExecution.FinalizeTurn();
+        combatExecution?.AdvanceTo(movementExecution.TurnDurationSeconds);
         scenarioTime = scenarioTime.AddMinutes(data.TurnMinutes);
         turnPhase = TurnPhase.Review;
         executionPaused = false;
@@ -392,7 +540,10 @@ internal sealed class BattlefieldView : Control
             order.ExecutionState == MoveOrderExecutionState.Complete);
         int partial = plannedOrders.Values.Count(order =>
             order.ExecutionState == MoveOrderExecutionState.Partial);
-        orderNotice = $"TURN {turnNumber} COMPLETE — {completed} ARRIVED, {partial} CONTINUING";
+        int losses = combatExecution?.Results.Sum(result => result.StrengthLoss) ?? 0;
+        int shots = combatExecution?.Results.Count(result => result.Fired) ?? 0;
+        orderNotice = $"TURN {turnNumber} COMPLETE — {completed} ARRIVED, {partial} CONTINUING, " +
+                      $"{shots} FIRED, {losses} LOSSES";
     }
 
     private void ToggleExecutionPause()
@@ -411,7 +562,12 @@ internal sealed class BattlefieldView : Control
                      .Where(pair => pair.Value.ExecutionState == MoveOrderExecutionState.Complete)
                      .Select(pair => pair.Key).ToArray())
             plannedOrders.Remove(unitId);
+        plannedFireOrders.Clear();
+        foreach (int unitId in plannedOrders.Where(pair => pair.Value.Unit.IsDestroyed)
+                     .Select(pair => pair.Key).ToArray())
+            plannedOrders.Remove(unitId);
         movementExecution = null;
+        combatExecution = null;
         turnNumber++;
         turnPhase = TurnPhase.Planning;
         orderNotice = $"TURN {turnNumber} PLANNING";
@@ -457,7 +613,8 @@ internal sealed class BattlefieldView : Control
     private void SelectUnitAtCursor()
     {
         if (selectedCell is not Point cell) return;
-        selectedUnit = data.Units.LastOrDefault(unit => unit.X == cell.X && unit.Y == cell.Y);
+        selectedUnit = data.Units.LastOrDefault(unit => !unit.IsDestroyed &&
+            unit.X == cell.X && unit.Y == cell.Y);
         Invalidate();
     }
 
@@ -621,6 +778,10 @@ internal sealed class BattlefieldView : Control
             DrawStat(g, "SUPPRESSION", selectedUnit.Suppression.ToString(), x, ref y, primary, secondary);
             DrawStat(g, "READINESS", selectedUnit.Readiness.ToString(), x, ref y, primary, secondary);
             DrawStat(g, "AMPHIBIOUS", selectedUnit.Amphibious ? "YES" : "NO", x, ref y, primary, secondary);
+            DrawStat(g, "FIREPOWER", $"H {selectedUnit.HardAttack} / S {selectedUnit.SoftAttack}",
+                x, ref y, primary, secondary);
+            DrawStat(g, "DEFENCE / RANGE", $"{selectedUnit.Defense} / {selectedUnit.RangeCells}",
+                x, ref y, primary, secondary);
             PlannedMoveOrder? order = plottingOrder?.Unit.Id == selectedUnit.Id
                 ? plottingOrder
                 : plannedOrders.GetValueOrDefault(selectedUnit.Id);
@@ -658,6 +819,29 @@ internal sealed class BattlefieldView : Control
                     else if (!string.IsNullOrWhiteSpace(order.ExecutionNote))
                         DrawStat(g, "MOVEMENT", order.ExecutionNote == "TRAFFIC BYPASS"
                             ? "BYPASS USED" : "REROUTED", x, ref y, primary, secondary);
+                }
+            }
+            else if (plannedFireOrders.TryGetValue(selectedUnit.Id,
+                         out PlannedFireOrder? fireOrder))
+            {
+                y += 7;
+                g.DrawLine(border, x, y, bounds.Right - 17, y);
+                y += 13;
+                g.DrawString("ORDERS", headingFont, accent, x, y);
+                y += 31;
+                DrawStat(g, "TYPE", "DIRECT FIRE", x, ref y, primary, secondary);
+                DrawStat(g, "STATUS", fireOrder.Status, x, ref y, primary, secondary);
+                DrawStat(g, "TARGET", CompactLabel(fireOrder.Target.Name, 18),
+                    x, ref y, primary, secondary);
+                DrawStat(g, "RANGE", $"{fireOrder.LineOfSight.Range} HEXES",
+                    x, ref y, primary, secondary);
+                DrawStat(g, "LOS", fireOrder.LineOfSight.Quality.ToString().ToUpperInvariant(),
+                    x, ref y, primary, secondary);
+                if (fireOrder.Result is CombatResult result)
+                {
+                    g.DrawString(result.Message, bodyFont, accent,
+                        new RectangleF(x + 8, y, bounds.Width - 42, 48));
+                    y += 48;
                 }
             }
         }
@@ -727,16 +911,31 @@ internal sealed class BattlefieldView : Control
         y += 27;
     }
 
+    private static string CompactLabel(string value, int maximumLength)
+    {
+        string upper = value.ToUpperInvariant();
+        return upper.Length <= maximumLength ? upper : upper[..(maximumLength - 1)] + "…";
+    }
+
     private void DrawMap(Graphics g, Rectangle bounds)
     {
         using Region oldClip = g.Clip;
         g.SetClip(bounds);
         DrawTerrainChunks(g, bounds);
+        if (inspectingLosUnit is not null && losVisibility is not null)
+            DrawLosVisibility(g, bounds);
 
-        foreach (PlannedMoveOrder order in plannedOrders.Values)
+        foreach (PlannedMoveOrder order in plannedOrders.Values
+                     .OrderBy(order => ReferenceEquals(order.Unit, selectedUnit)))
             DrawOrderRoute(g, bounds, order, false);
         if (plottingOrder is not null)
             DrawOrderRoute(g, bounds, plottingOrder, true);
+        foreach (PlannedFireOrder order in plannedFireOrders.Values)
+            DrawFireOrder(g, bounds, order);
+        if (targetingFireUnit is not null && selectedCell is Point fireCell)
+            DrawFirePreview(g, bounds, targetingFireUnit, fireCell);
+        if (inspectingLosUnit is not null && selectedCell is Point losCell)
+            DrawLosInspection(g, bounds, inspectingLosUnit, losCell);
 
         int firstX = Math.Max(0, (int)Math.Floor(cameraX) - 2);
         int firstY = Math.Max(0, (int)Math.Floor(cameraY) - 2);
@@ -745,7 +944,7 @@ internal sealed class BattlefieldView : Control
         int lastY = Math.Min(data.MapHeight - 1,
             firstY + (int)Math.Ceiling(bounds.Height / HexHeight) + 4);
 
-        foreach (ScenarioUnit unit in data.Units)
+        foreach (ScenarioUnit unit in data.Units.Where(unit => !unit.IsDestroyed))
         {
             if (unit.X < firstX - 1 || unit.X > lastX + 1 || unit.Y < firstY - 1 || unit.Y > lastY + 1)
                 continue;
@@ -765,6 +964,8 @@ internal sealed class BattlefieldView : Control
             RectangleF cb = CellBounds(bounds, selected.X, selected.Y);
             Color selectionColor = plottingOrder is { IsReachable: false }
                 ? Color.FromArgb(224, 66, 54)
+                : targetingFireUnit is not null && !FirePreviewIsValid()
+                    ? Color.FromArgb(224, 66, 54)
                 : Color.FromArgb(240, 210, 42);
             using var selection = new Pen(selectionColor, 3);
             using GraphicsPath selectedHex = HexPath(RectangleF.Inflate(cb, -2, -2));
@@ -791,9 +992,10 @@ internal sealed class BattlefieldView : Control
         if (order.Route.Count < 2) return;
         PointF[] points = RouteDisplayPoints(bounds, order.Route);
         bool nato = order.Unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase);
+        bool selectedRoute = ReferenceEquals(order.Unit, selectedUnit);
         Color routeColor = !order.IsReachable
             ? Color.FromArgb(224, 66, 54)
-            : plotting
+            : plotting || selectedRoute
                 ? Color.FromArgb(242, 211, 54)
                 : nato
                     ? Color.FromArgb(210, 115, 205, 225)
@@ -804,7 +1006,7 @@ internal sealed class BattlefieldView : Control
             StartCap = LineCap.Round,
             EndCap = LineCap.ArrowAnchor
         };
-        using var route = new Pen(routeColor, plotting ? 3.5f : 2.5f)
+        using var route = new Pen(routeColor, plotting || selectedRoute ? 3.5f : 2.5f)
         {
             LineJoin = LineJoin.Round,
             StartCap = LineCap.Round,
@@ -832,6 +1034,131 @@ internal sealed class BattlefieldView : Control
             g.DrawString(label, counterFont, waypointText,
                 center.X - labelSize.Width / 2, center.Y - labelSize.Height / 2);
         }
+    }
+
+    private void DrawFireOrder(Graphics g, Rectangle bounds, PlannedFireOrder order)
+    {
+        if (order.Unit.IsDestroyed || order.Target.IsDestroyed && order.Result is null) return;
+        PointF source = UnitScreenCenter(bounds, order.Unit);
+        PointF target = UnitScreenCenter(bounds, order.Target);
+        Color color = order.State == FireOrderState.Invalid
+            ? Color.FromArgb(225, 82, 72)
+            : order.Unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase)
+                ? Color.FromArgb(235, 242, 211, 54)
+                : Color.FromArgb(235, 238, 117, 104);
+        using var shadow = new Pen(Color.FromArgb(190, 5, 20, 25), 6)
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round
+        };
+        using var fire = new Pen(color, order.State == FireOrderState.Complete ? 3.5f : 2.5f)
+        {
+            DashStyle = order.State == FireOrderState.Planned ? DashStyle.Dash : DashStyle.Solid,
+            StartCap = LineCap.Round,
+            EndCap = LineCap.ArrowAnchor
+        };
+        g.DrawLine(shadow, source, target);
+        g.DrawLine(fire, source, target);
+
+        if (order.Result is CombatResult result)
+        {
+            float radius = result.StrengthLoss > 0 ? 13 : 9;
+            using var impact = new Pen(Color.FromArgb(245, 255, 224, 128), 3);
+            g.DrawEllipse(impact, target.X - radius, target.Y - radius, radius * 2, radius * 2);
+        }
+    }
+
+    private void DrawFirePreview(Graphics g, Rectangle bounds, ScenarioUnit attacker, Point targetCell)
+    {
+        LineOfSightResult sight = lineOfSight.Trace(
+            new Point(attacker.X, attacker.Y), targetCell);
+        ScenarioUnit? target = EnemyAt(targetCell, attacker.Faction);
+        bool valid = target is not null && directFire.Validate(attacker, target).CanFire;
+        Color color = valid
+            ? sight.Quality == LineOfSightQuality.Clear
+                ? Color.FromArgb(235, 242, 211, 54)
+                : Color.FromArgb(235, 238, 166, 53)
+            : Color.FromArgb(235, 224, 66, 54);
+        PointF source = CellCenter(bounds, new Point(attacker.X, attacker.Y));
+        PointF destination = CellCenter(bounds, targetCell);
+        using var shadow = new Pen(Color.FromArgb(190, 5, 20, 25), 7);
+        using var preview = new Pen(color, 3.5f)
+        {
+            DashStyle = DashStyle.Dash,
+            EndCap = LineCap.ArrowAnchor
+        };
+        g.DrawLine(shadow, source, destination);
+        g.DrawLine(preview, source, destination);
+        if (sight.BlockingCell is Point blocker)
+        {
+            PointF blocked = CellCenter(bounds, blocker);
+            using var marker = new Pen(Color.FromArgb(245, 224, 66, 54), 3);
+            g.DrawLine(marker, blocked.X - 8, blocked.Y - 8, blocked.X + 8, blocked.Y + 8);
+            g.DrawLine(marker, blocked.X + 8, blocked.Y - 8, blocked.X - 8, blocked.Y + 8);
+        }
+    }
+
+    private void DrawLosVisibility(Graphics g, Rectangle bounds)
+    {
+        if (losVisibility is null) return;
+        using var clearFill = new SolidBrush(Color.FromArgb(100, 80, 235, 135));
+        using var obscuredFill = new SolidBrush(Color.FromArgb(100, 245, 185, 55));
+        using var clearEdge = new Pen(Color.FromArgb(220, 120, 242, 160), 1.5f);
+        using var obscuredEdge = new Pen(Color.FromArgb(220, 242, 190, 65), 1.5f);
+        for (int x = 0; x < data.MapWidth; x++)
+        for (int y = 0; y < data.MapHeight; y++)
+        {
+            LineOfSightQuality quality = losVisibility[x, y];
+            if (quality == LineOfSightQuality.Blocked) continue;
+            RectangleF cell = CellBounds(bounds, x, y);
+            if (!cell.IntersectsWith(bounds)) continue;
+            using GraphicsPath hex = HexPath(cell);
+            g.FillPath(quality == LineOfSightQuality.Clear ? clearFill : obscuredFill, hex);
+            g.DrawPath(quality == LineOfSightQuality.Clear ? clearEdge : obscuredEdge, hex);
+        }
+    }
+
+    private void DrawLosInspection(Graphics g, Rectangle bounds, ScenarioUnit observer, Point targetCell)
+    {
+        LineOfSightResult sight = lineOfSight.Trace(new Point(observer.X, observer.Y), targetCell);
+        Color color = sight.Quality switch
+        {
+            LineOfSightQuality.Clear => Color.FromArgb(120, 242, 160),
+            LineOfSightQuality.Obscured => Color.FromArgb(242, 190, 65),
+            _ => Color.FromArgb(242, 95, 80)
+        };
+        using var shadow = new Pen(Color.FromArgb(210, 5, 20, 25), 7);
+        using var line = new Pen(color, 3) { EndCap = LineCap.ArrowAnchor };
+        PointF start = CellCenter(bounds, new Point(observer.X, observer.Y));
+        PointF end = CellCenter(bounds, targetCell);
+        g.DrawLine(shadow, start, end);
+        g.DrawLine(line, start, end);
+        if (sight.BlockingCell is Point blocker)
+        {
+            PointF point = CellCenter(bounds, blocker);
+            g.DrawLine(line, point.X - 9, point.Y - 9, point.X + 9, point.Y + 9);
+            g.DrawLine(line, point.X + 9, point.Y - 9, point.X - 9, point.Y + 9);
+        }
+    }
+
+    private string LosInspectionNotice()
+    {
+        if (inspectingLosUnit is null || selectedCell is not Point cell) return "INSPECT LOS";
+        LineOfSightResult sight = lineOfSight.Trace(new Point(inspectingLosUnit.X, inspectingLosUnit.Y), cell);
+        return $"GREEN / AMBER = VISIBLE  |  LOS: {sight.Reason ?? sight.Quality.ToString().ToUpperInvariant()} — " +
+               $"{sight.Range} HEXES / {sight.Range * data.CellSizeMeters} M";
+    }
+
+    private ScenarioUnit? EnemyAt(Point cell, string friendlyFaction) =>
+        data.Units.LastOrDefault(unit => !unit.IsDestroyed && unit.X == cell.X &&
+            unit.Y == cell.Y &&
+            !unit.Faction.Equals(friendlyFaction, StringComparison.OrdinalIgnoreCase));
+
+    private bool FirePreviewIsValid()
+    {
+        if (targetingFireUnit is null || selectedCell is not Point cell) return false;
+        ScenarioUnit? target = EnemyAt(cell, targetingFireUnit.Faction);
+        return target is not null && directFire.Validate(targetingFireUnit, target).CanFire;
     }
 
     private PointF[] RouteDisplayPoints(Rectangle bounds, IReadOnlyList<Point> cells)
@@ -918,6 +1245,29 @@ internal sealed class BattlefieldView : Control
 
     private void DrawTerrainChunks(Graphics g, Rectangle bounds)
     {
+        // Terrain is rasterized at one resolution, not rebuilt for every wheel event.
+        const float rasterCellSize = 72f;
+        float displayCellSize = cellSize;
+        float scale = displayCellSize / rasterCellSize;
+        GraphicsState state = g.Save();
+        try
+        {
+            g.TranslateTransform(bounds.X, bounds.Y);
+            g.ScaleTransform(scale, scale);
+            cellSize = rasterCellSize;
+            DrawTerrainChunksAtRasterSize(g, new Rectangle(0, 0,
+                (int)Math.Ceiling(bounds.Width / scale),
+                (int)Math.Ceiling(bounds.Height / scale)));
+        }
+        finally
+        {
+            cellSize = displayCellSize;
+            g.Restore(state);
+        }
+    }
+
+    private void DrawTerrainChunksAtRasterSize(Graphics g, Rectangle bounds)
+    {
         if (Math.Abs(terrainLayerCellSize - cellSize) >= 0.01f)
         {
             foreach (Bitmap chunk in terrainChunks.Values) chunk.Dispose();
@@ -938,7 +1288,8 @@ internal sealed class BattlefieldView : Control
             Rectangle chunkWorldBounds = TerrainChunkWorldBounds(chunkX, chunkY);
             float destinationX = bounds.X + chunkWorldBounds.Left - sourceX;
             float destinationY = bounds.Y + chunkWorldBounds.Top - sourceY;
-            g.DrawImageUnscaled(chunk, (int)Math.Floor(destinationX), (int)Math.Floor(destinationY));
+            g.DrawImage(chunk, new RectangleF(destinationX, destinationY, chunk.Width, chunk.Height),
+                new RectangleF(0, 0, chunk.Width, chunk.Height), GraphicsUnit.Pixel);
         }
     }
 
@@ -1401,8 +1752,12 @@ internal sealed class BattlefieldView : Control
 
         string help = turnPhase switch
         {
-            TurnPhase.Executing => "SIMULTANEOUS MOVEMENT     SPACE  PAUSE / RESUME     DRAG  PAN",
+            _ when inspectingLosUnit is not null =>
+                "MOUSE / ARROWS  INSPECT ANY HEX     DONE / ESC / L  CLOSE",
+            TurnPhase.Executing => "SIMULTANEOUS MOVEMENT / FIRE     SPACE  PAUSE / RESUME     DRAG  PAN",
             TurnPhase.Review => "REVIEW RESULTS     ENTER / NEXT TURN  RETURN TO PLANNING",
+            _ when targetingFireUnit is not null =>
+                "CLICK / ENTER  SELECT ENEMY TARGET     ESC / CANCEL  ABORT",
             _ when plottingOrder is not null =>
                 "CLICK / ENTER  WAYPOINT     DOUBLE-CLICK  CONFIRM     BACKSPACE  UNDO     ESC  CANCEL",
             _ => "RIGHT-CLICK UNIT  ORDERS     WASD / ARROWS  CURSOR     EDGE / DRAG  PAN"
@@ -1410,7 +1765,11 @@ internal sealed class BattlefieldView : Control
         SizeF size = g.MeasureString(help, bodyFont);
         g.DrawString(help, bodyFont, text, bounds.Right - size.Width - 18, bounds.Top + 21);
 
-        string? notice = plottingOrder switch
+        string? notice = inspectingLosUnit is not null
+            ? LosInspectionNotice()
+            : targetingFireUnit is not null
+            ? FirePreviewNotice()
+            : plottingOrder switch
         {
             { IsReachable: false } => plottingOrder.FailureReason ?? "NO LEGAL ROUTE",
             { IsReachable: true } => $"ROUTE COST {plottingOrder.TotalCost / 10f:0.0}",
@@ -1432,10 +1791,12 @@ internal sealed class BattlefieldView : Control
 
     private string[] FooterCommands() => turnPhase switch
     {
+        _ when inspectingLosUnit is not null => ["DONE"],
         TurnPhase.Executing => [executionPaused ? "RESUME" : "PAUSE"],
-        TurnPhase.Review => ["NEXT TURN"],
+        TurnPhase.Review => ["NEXT TURN", "LOS"],
+        _ when targetingFireUnit is not null => ["CONFIRM", "CANCEL"],
         _ when plottingOrder is not null => ["CONFIRM", "UNDO", "CANCEL"],
-        _ => ["SELECT", "MOVE", "FIRE", "ASSAULT", "EXECUTE"]
+        _ => ["SELECT", "MOVE", "FIRE", "ASSAULT", "EXECUTE", "LOS"]
     };
 
     private string? ExecutionNotice()
@@ -1448,7 +1809,23 @@ internal sealed class BattlefieldView : Control
             unit.Order.Unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase));
         int pactMoving = movementExecution.Units.Count(unit => !unit.RouteComplete &&
             !unit.Order.Unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase));
-        return $"{state} {percent}% — NATO {natoMoving} / PACT {pactMoving} MOVING";
+        int firePending = combatExecution?.Orders.Count(order =>
+            order.State == FireOrderState.Executing) ?? 0;
+        return $"{state} {percent}% — NATO {natoMoving} / PACT {pactMoving} MOVING, " +
+               $"{firePending} FIRE ORDERS PENDING";
+    }
+
+    private string FirePreviewNotice()
+    {
+        if (targetingFireUnit is null || selectedCell is not Point cell)
+            return orderNotice ?? "SELECT ENEMY TARGET";
+        ScenarioUnit? target = EnemyAt(cell, targetingFireUnit.Faction);
+        if (target is not null) return directFire.Validate(targetingFireUnit, target).Message;
+        LineOfSightResult sight = lineOfSight.Trace(
+            new Point(targetingFireUnit.X, targetingFireUnit.Y), cell);
+        return sight.Quality == LineOfSightQuality.Blocked
+            ? sight.Reason ?? "LINE OF SIGHT BLOCKED"
+            : $"SELECT ENEMY TARGET — RANGE {sight.Range} / {targetingFireUnit.RangeCells}";
     }
 
     private void DrawMiniMap(Graphics g, Rectangle mapBounds)
@@ -1470,7 +1847,7 @@ internal sealed class BattlefieldView : Control
         if (miniMapLayer is not null)
             g.DrawImageUnscaled(miniMapLayer, inner.Location);
 
-        foreach (ScenarioUnit unit in data.Units)
+        foreach (ScenarioUnit unit in data.Units.Where(unit => !unit.IsDestroyed))
         {
             bool nato = unit.Faction.Equals("NATO", StringComparison.OrdinalIgnoreCase);
             PointF mapPosition = UnitMiniMapPosition(unit);
@@ -1579,13 +1956,15 @@ internal sealed class BattlefieldView : Control
             ClampCamera();
             Invalidate();
         }
-        else if (plottingOrder is not null && MapBounds().Contains(e.Location))
+        else if ((plottingOrder is not null || targetingFireUnit is not null ||
+                  inspectingLosUnit is not null) &&
+                 MapBounds().Contains(e.Location))
         {
             Point? hover = HitCell(e.Location);
             if (hover is Point cell && selectedCell != cell)
             {
                 selectedCell = cell;
-                RebuildRoute(plottingOrder);
+                if (plottingOrder is not null) RebuildRoute(plottingOrder);
                 Invalidate();
             }
         }
@@ -1609,7 +1988,21 @@ internal sealed class BattlefieldView : Control
             {
                 if (dragButton == MouseButtons.Left)
                 {
-                    if (plottingOrder is not null)
+                    if (inspectingLosUnit is not null)
+                    {
+                        selectedCell = HitCell(e.Location) ?? selectedCell;
+                        Invalidate();
+                    }
+                    else if (targetingFireUnit is not null)
+                    {
+                        Point? cell = HitCell(e.Location);
+                        if (cell is Point target)
+                        {
+                            selectedCell = target;
+                            ConfirmFireTargetAtCursor();
+                        }
+                    }
+                    else if (plottingOrder is not null)
                     {
                         Point? cell = HitCell(e.Location);
                         if (cell is Point waypoint) AddWaypoint(waypoint);
@@ -1618,7 +2011,15 @@ internal sealed class BattlefieldView : Control
                 }
                 else if (dragButton == MouseButtons.Right)
                 {
-                    if (plottingOrder is not null)
+                    if (inspectingLosUnit is not null)
+                    {
+                        ToggleLosInspection();
+                    }
+                    else if (targetingFireUnit is not null)
+                    {
+                        CancelFireTargeting();
+                    }
+                    else if (plottingOrder is not null)
                     {
                         CancelPlotting();
                     }
@@ -1655,6 +2056,12 @@ internal sealed class BattlefieldView : Control
             !FooterButtonBounds(footer, 20 + index * 116).Contains(point))
             return;
 
+        if (inspectingLosUnit is not null)
+        {
+            ToggleLosInspection();
+            return;
+        }
+
         if (turnPhase == TurnPhase.Executing)
         {
             if (index == 0) ToggleExecutionPause();
@@ -1663,6 +2070,14 @@ internal sealed class BattlefieldView : Control
         if (turnPhase == TurnPhase.Review)
         {
             if (index == 0) BeginNextTurn();
+            else if (index == 1) ToggleLosInspection();
+            return;
+        }
+
+        if (targetingFireUnit is not null)
+        {
+            if (index == 0) ConfirmFireTargetAtCursor();
+            else if (index == 1) CancelFireTargeting();
             return;
         }
 
@@ -1676,15 +2091,20 @@ internal sealed class BattlefieldView : Control
 
         if (index == 1 && selectedUnit is not null)
             BeginMoveOrder(OrderPosture.Tactical);
-        else if (index is 2 or 3)
-            ShowDeferredAction(index == 2 ? "FIRE — W2.4" : "ASSAULT — W2.4");
+        else if (index == 2)
+            BeginFireOrder();
+        else if (index == 3)
+            ShowDeferredAction("ASSAULT — W2.6");
         else if (index == 4)
             BeginExecution();
+        else if (index == 5)
+            ToggleLosInspection();
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
-        ZoomAt(e.Location, e.Delta > 0 ? 1.12f : 0.89f);
+        if (e.Delta != 0 && MapBounds().Contains(e.Location))
+            ZoomAt(e.Location, MathF.Pow(1.2f, e.Delta / 120f));
         base.OnMouseWheel(e);
     }
 
@@ -1694,7 +2114,8 @@ internal sealed class BattlefieldView : Control
         if (hit is not Point cell) return;
 
         selectedCell = cell;
-        selectedUnit = data.Units.LastOrDefault(unit => unit.X == cell.X && unit.Y == cell.Y);
+        selectedUnit = data.Units.LastOrDefault(unit => !unit.IsDestroyed &&
+            unit.X == cell.X && unit.Y == cell.Y);
         Invalidate();
     }
 

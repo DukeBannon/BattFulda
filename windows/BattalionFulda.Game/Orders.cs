@@ -60,7 +60,7 @@ internal sealed class MovementModel(GameData data)
             return null;
 
         if (data.Units.Any(other =>
-                other.Id != unit.Id && other.X == to.X && other.Y == to.Y &&
+                !other.IsDestroyed && other.Id != unit.Id && other.X == to.X && other.Y == to.Y &&
                 !other.Faction.Equals(unit.Faction, StringComparison.OrdinalIgnoreCase)))
             return null;
 

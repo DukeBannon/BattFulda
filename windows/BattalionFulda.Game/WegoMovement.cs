@@ -27,7 +27,8 @@ internal sealed class UnitMovementExecution
     public ScenarioUnit? BlockingUnit { get; private set; }
     public bool ReroutedForTraffic { get; private set; }
     public bool IsFinalized { get; private set; }
-    public bool RouteComplete => IsFinalized || NextCellIndex >= Order.Route.Count;
+    public bool RouteComplete => IsFinalized || Order.Unit.IsDestroyed ||
+                                 NextCellIndex >= Order.Route.Count;
     public Point Current => new(Order.Unit.X, Order.Unit.Y);
     public Point Next => RouteComplete ? Current : Order.Route[NextCellIndex];
     public double CostRatePerGameSecond => Order.Unit.MovePoints * 10.0 /
@@ -60,6 +61,8 @@ internal sealed class UnitMovementExecution
         Order.Unit.X = Next.X;
         Order.Unit.Y = Next.Y;
         NextCellIndex++;
+        if (Order.Waypoints.Count > 0 && Order.Waypoints[0] == Current)
+            Order.Waypoints.RemoveAt(0);
         WaitingForTraffic = false;
         TrafficHoldSeconds = 0;
         BlockingUnit = null;
@@ -83,25 +86,46 @@ internal sealed class UnitMovementExecution
         if (!WaitingForTraffic || TrafficHoldSeconds < BypassDelaySeconds || RouteComplete)
             return false;
 
-        Point destination = Order.Route[^1];
-        RouteResult bypass = planner.FindRoute(
-            Order.Unit, Current, destination, Order.Posture, occupiedCells);
-        if (!bypass.Success || bypass.Cells.Count < 2 || bypass.Cells[1] == Next)
-            return false;
+        // Rejoin locally, never discard the player's waypoints or re-plan to
+        // the final destination. A blocked waypoint remains a traffic hold.
+        int lastRejoin = Math.Min(Order.Route.Count - 1, NextCellIndex + 4);
+        if (Order.Waypoints.Count > 0)
+        {
+            int waypointIndex = Order.Route.IndexOf(Order.Waypoints[0], NextCellIndex);
+            if (waypointIndex >= 0) lastRejoin = Math.Min(lastRejoin, waypointIndex);
+        }
+        RouteResult? bypass = null;
+        int rejoinIndex = -1;
+        for (int index = NextCellIndex + 1; index <= lastRejoin; index++)
+        {
+            Point rejoin = Order.Route[index];
+            if (occupiedCells.Contains(rejoin)) continue;
+            RouteResult candidate = planner.FindRoute(
+                Order.Unit, Current, rejoin, Order.Posture, occupiedCells);
+            int originalSteps = index - NextCellIndex + 1;
+            if (!candidate.Success || candidate.Cells.Count < 2 || candidate.Cells[1] == Next ||
+                candidate.Cells.Count - 1 > originalSteps + 3 ||
+                candidate.Cells.Any(cell => LineOfSightModel.HexDistance(Current, cell) > 4))
+                continue;
+            bypass = candidate;
+            rejoinIndex = index;
+            break;
+        }
+        if (bypass is null) return false;
 
+        Point[] preservedTail = Order.Route.Skip(rejoinIndex + 1).ToArray();
         Order.Route.Clear();
         Order.Route.AddRange(bypass.Cells);
-        Order.Waypoints.Clear();
-        Order.Waypoints.Add(destination);
-        Order.TotalCost = bypass.Cost;
+        Order.Route.AddRange(preservedTail);
         Order.CarriedStepCost = 0;
         StepProgress = 0;
         NextCellIndex = 1;
+        Order.TotalCost = CalculateRemainingCost();
         WaitingForTraffic = false;
         TrafficHoldSeconds = 0;
         BlockingUnit = null;
         ReroutedForTraffic = true;
-        Order.ExecutionNote = "REROUTED AROUND TRAFFIC";
+        Order.ExecutionNote = "LOCAL TRAFFIC BYPASS — WAYPOINTS PRESERVED";
         return true;
     }
 
@@ -116,6 +140,7 @@ internal sealed class UnitMovementExecution
             Order.TotalCost = 0;
             Order.CarriedStepCost = 0;
             Order.ExecutionState = MoveOrderExecutionState.Complete;
+            if (Order.Unit.IsDestroyed) Order.ExecutionNote = "DESTROYED";
             IsFinalized = true;
             return;
         }
@@ -159,7 +184,7 @@ internal sealed class WegoMovementExecution
         routePlanner = new AStarRoutePlanner(data);
         TurnDurationSeconds = data.TurnMinutes * 60.0;
         var movement = new MovementModel(data);
-        units = orders.Where(order => order.Confirmed && order.Route.Count > 1)
+        units = orders.Where(order => !order.Unit.IsDestroyed && order.Confirmed && order.Route.Count > 1)
             .OrderBy(order => order.Unit.Id)
             .Select(order => new UnitMovementExecution(order, movement, TurnDurationSeconds))
             .ToList();
@@ -210,7 +235,7 @@ internal sealed class WegoMovementExecution
         foreach (UnitMovementExecution candidate in candidates)
         {
             ScenarioUnit? occupant = data.Units.FirstOrDefault(unit =>
-                !ReferenceEquals(unit, candidate.Order.Unit) &&
+                !unit.IsDestroyed && !ReferenceEquals(unit, candidate.Order.Unit) &&
                 unit.X == candidate.Next.X && unit.Y == candidate.Next.Y);
             if (winners.Contains(candidate) && occupant is null)
                 candidate.CompleteStep();
@@ -225,7 +250,7 @@ internal sealed class WegoMovementExecution
         foreach (UnitMovementExecution candidate in candidates.Where(unit => unit.WaitingForTraffic))
         {
             HashSet<Point> occupied = data.Units
-                .Where(unit => !ReferenceEquals(unit, candidate.Order.Unit))
+                .Where(unit => !unit.IsDestroyed && !ReferenceEquals(unit, candidate.Order.Unit))
                 .Select(unit => new Point(unit.X, unit.Y))
                 .ToHashSet();
             candidate.TryTrafficBypass(routePlanner, occupied);

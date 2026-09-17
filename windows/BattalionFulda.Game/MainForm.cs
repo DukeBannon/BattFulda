@@ -6,7 +6,7 @@ internal sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "Battalion: Fulda — W2.3 WEGO Movement";
+        Text = "Battalion: Fulda — W2.4 Direct Fire";
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(1600, 900);
         MinimumSize = new Size(1100, 700);

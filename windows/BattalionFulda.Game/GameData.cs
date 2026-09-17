@@ -32,7 +32,12 @@ internal sealed class ScenarioUnit(
     int readiness,
     bool amphibious,
     string mobility,
-    int movePoints)
+    int movePoints,
+    string category,
+    int hardAttack,
+    int softAttack,
+    int defense,
+    int rangeCells)
 {
     public int Id { get; } = id;
     public string Key { get; } = key;
@@ -44,14 +49,27 @@ internal sealed class ScenarioUnit(
     public string Country { get; } = country;
     public int X { get; set; } = x;
     public int Y { get; set; } = y;
-    public int Strength { get; } = strength;
-    public int Morale { get; } = morale;
-    public int Suppression { get; } = suppression;
-    public int Readiness { get; } = readiness;
+    public int Strength { get; set; } = strength;
+    public int Morale { get; set; } = morale;
+    public int Suppression { get; set; } = suppression;
+    public int Readiness { get; set; } = readiness;
     public bool Amphibious { get; } = amphibious;
     public string Mobility { get; } = mobility;
     public int MovePoints { get; } = movePoints;
+    public string Category { get; } = category;
+    public int HardAttack { get; } = hardAttack;
+    public int SoftAttack { get; } = softAttack;
+    public int Defense { get; } = defense;
+    public int RangeCells { get; } = rangeCells;
+    public bool IsDestroyed => Strength <= 0;
 }
+
+internal sealed record UnitTypeCombatProfile(
+    string Category,
+    int HardAttack,
+    int SoftAttack,
+    int Defense,
+    int RangeCells);
 
 internal readonly record struct HexEdgeKey(int AX, int AY, int BX, int BY)
 {
@@ -142,8 +160,11 @@ internal sealed class GameData
         int height = ParseInt(map[4]);
         MapCell[,] cells = LoadMap(
             Path.Combine(root, "data", "maps", "point_alpha_cells.csv"), width, height);
+        IReadOnlyDictionary<string, UnitTypeCombatProfile> combatProfiles =
+            LoadCombatProfiles(Path.Combine(root, "data", "database", "exports",
+                "unit_types.csv"));
         IReadOnlyList<ScenarioUnit> units = LoadUnits(Path.Combine(
-            root, "data", "database", "exports", "scenario_units.csv"));
+            root, "data", "database", "exports", "scenario_units.csv"), combatProfiles);
         IReadOnlyList<MapFeaturePath> features = LoadFeatures(Path.Combine(
             root, "data", "maps", "point_alpha_features.csv"));
         IReadOnlyDictionary<HexEdgeKey, MapEdge> edges = LoadEdges(Path.Combine(
@@ -229,7 +250,8 @@ internal sealed class GameData
             .ToArray();
     }
 
-    private static IReadOnlyList<ScenarioUnit> LoadUnits(string path)
+    private static IReadOnlyList<ScenarioUnit> LoadUnits(
+        string path, IReadOnlyDictionary<string, UnitTypeCombatProfile> combatProfiles)
     {
         var units = new List<ScenarioUnit>();
         foreach (string[] row in ReadCsv(path).Skip(1))
@@ -237,15 +259,24 @@ internal sealed class GameData
             if (!string.Equals(row[0], "a2_command_post", StringComparison.OrdinalIgnoreCase))
                 continue;
 
+            UnitTypeCombatProfile combat = combatProfiles[row[6]];
             units.Add(new ScenarioUnit(
                 ParseInt(row[1]), row[2], row[3], row[4], row[5], row[7], row[8], row[9],
                 ParseInt(row[10]), ParseInt(row[11]), ParseInt(row[12]), ParseInt(row[13]),
                 ParseInt(row[14]), ParseInt(row[15]), ParseInt(row[16]) != 0,
-                row[17].ToLowerInvariant(), ParseInt(row[18])));
+                row[17].ToLowerInvariant(), ParseInt(row[18]), combat.Category,
+                combat.HardAttack, combat.SoftAttack, combat.Defense, combat.RangeCells));
         }
 
         return units;
     }
+
+    private static IReadOnlyDictionary<string, UnitTypeCombatProfile> LoadCombatProfiles(
+        string path) => ReadCsv(path).Skip(1).ToDictionary(
+            row => row[1],
+            row => new UnitTypeCombatProfile(row[5].ToLowerInvariant(), ParseInt(row[11]),
+                ParseInt(row[12]), ParseInt(row[13]), ParseInt(row[14])),
+            StringComparer.OrdinalIgnoreCase);
 
     private static IReadOnlyDictionary<HexEdgeKey, MapEdge> LoadEdges(string path)
     {
